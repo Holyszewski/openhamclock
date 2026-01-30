@@ -486,6 +486,122 @@ app.get('/api/myspots/:callsign', async (req, res) => {
 });
 
 // ============================================
+// SATELLITE TRACKING API
+// ============================================
+
+// Ham radio satellites - NORAD IDs
+const HAM_SATELLITES = {
+  'ISS': { norad: 25544, name: 'ISS (ZARYA)', color: '#00ffff', priority: 1 },
+  'AO-91': { norad: 43017, name: 'AO-91 (Fox-1B)', color: '#ff6600', priority: 2 },
+  'AO-92': { norad: 43137, name: 'AO-92 (Fox-1D)', color: '#ff9900', priority: 2 },
+  'SO-50': { norad: 27607, name: 'SO-50 (SaudiSat)', color: '#00ff00', priority: 2 },
+  'RS-44': { norad: 44909, name: 'RS-44 (DOSAAF)', color: '#ff0066', priority: 2 },
+  'IO-117': { norad: 53106, name: 'IO-117 (GreenCube)', color: '#00ff99', priority: 3 },
+  'CAS-4A': { norad: 42761, name: 'CAS-4A (ZHUHAI-1 01)', color: '#9966ff', priority: 3 },
+  'CAS-4B': { norad: 42759, name: 'CAS-4B (ZHUHAI-1 02)', color: '#9933ff', priority: 3 },
+  'PO-101': { norad: 43678, name: 'PO-101 (Diwata-2)', color: '#ff3399', priority: 3 },
+  'TEVEL': { norad: 50988, name: 'TEVEL-1', color: '#66ccff', priority: 4 }
+};
+
+// Cache for TLE data (refresh every 6 hours)
+let tleCache = { data: null, timestamp: 0 };
+const TLE_CACHE_DURATION = 6 * 60 * 60 * 1000; // 6 hours
+
+app.get('/api/satellites/tle', async (req, res) => {
+  console.log('[Satellites] Fetching TLE data...');
+  
+  try {
+    const now = Date.now();
+    
+    // Return cached data if fresh
+    if (tleCache.data && (now - tleCache.timestamp) < TLE_CACHE_DURATION) {
+      console.log('[Satellites] Returning cached TLE data');
+      return res.json(tleCache.data);
+    }
+    
+    // Fetch fresh TLE data from CelesTrak
+    const tleData = {};
+    
+    // Fetch amateur radio satellites TLE
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    
+    const response = await fetch(
+      'https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=tle',
+      {
+        headers: { 'User-Agent': 'OpenHamClock/3.3' },
+        signal: controller.signal
+      }
+    );
+    clearTimeout(timeout);
+    
+    if (response.ok) {
+      const text = await response.text();
+      const lines = text.trim().split('\n');
+      
+      // Parse TLE data (3 lines per satellite: name, line1, line2)
+      for (let i = 0; i < lines.length - 2; i += 3) {
+        const name = lines[i].trim();
+        const line1 = lines[i + 1]?.trim();
+        const line2 = lines[i + 2]?.trim();
+        
+        if (line1 && line2 && line1.startsWith('1 ') && line2.startsWith('2 ')) {
+          // Extract NORAD ID from line 1
+          const noradId = parseInt(line1.substring(2, 7));
+          
+          // Check if this is a satellite we care about
+          for (const [key, sat] of Object.entries(HAM_SATELLITES)) {
+            if (sat.norad === noradId) {
+              tleData[key] = {
+                ...sat,
+                tle1: line1,
+                tle2: line2
+              };
+              console.log('[Satellites] Found TLE for:', key, noradId);
+            }
+          }
+        }
+      }
+    }
+    
+    // Also try to get ISS specifically (it's in the stations group)
+    if (!tleData['ISS']) {
+      try {
+        const issResponse = await fetch(
+          'https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=tle',
+          { headers: { 'User-Agent': 'OpenHamClock/3.3' } }
+        );
+        if (issResponse.ok) {
+          const issText = await issResponse.text();
+          const issLines = issText.trim().split('\n');
+          if (issLines.length >= 3) {
+            tleData['ISS'] = {
+              ...HAM_SATELLITES['ISS'],
+              tle1: issLines[1].trim(),
+              tle2: issLines[2].trim()
+            };
+            console.log('[Satellites] Found ISS TLE');
+          }
+        }
+      } catch (e) {
+        console.log('[Satellites] Could not fetch ISS TLE:', e.message);
+      }
+    }
+    
+    // Cache the result
+    tleCache = { data: tleData, timestamp: now };
+    
+    console.log('[Satellites] Loaded TLE for', Object.keys(tleData).length, 'satellites');
+    res.json(tleData);
+    
+  } catch (error) {
+    console.error('[Satellites] TLE fetch error:', error.message);
+    // Return cached data even if stale, or empty object
+    res.json(tleCache.data || {});
+  }
+});
+
+// ============================================
 // VOACAP / HF PROPAGATION PREDICTION API
 // ============================================
 

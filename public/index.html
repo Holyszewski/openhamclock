@@ -19,6 +19,9 @@
   <!-- Leaflet Terminator (day/night) -->
   <script src="https://unpkg.com/@joergdietrich/leaflet.terminator@1.0.0/L.Terminator.js"></script>
   
+  <!-- Satellite.js for orbital calculations -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/5.0.0/satellite.min.js"></script>
+  
   <!-- React -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -938,6 +941,116 @@
     };
 
     // ============================================
+    // SATELLITE TRACKING HOOK
+    // ============================================
+    const useSatellites = (deLocation) => {
+      const [tleData, setTleData] = useState({});
+      const [positions, setPositions] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      // Fetch TLE data on mount
+      useEffect(() => {
+        const fetchTLE = async () => {
+          try {
+            const response = await fetch('/api/satellites/tle');
+            if (response.ok) {
+              const data = await response.json();
+              setTleData(data);
+              console.log('[Satellites] Loaded TLE for', Object.keys(data).length, 'satellites');
+            }
+          } catch (err) {
+            console.error('Satellite TLE fetch error:', err);
+          } finally {
+            setLoading(false);
+          }
+        };
+        
+        fetchTLE();
+        // Refresh TLE every 6 hours
+        const interval = setInterval(fetchTLE, 6 * 60 * 60 * 1000);
+        return () => clearInterval(interval);
+      }, []);
+
+      // Calculate positions every second
+      useEffect(() => {
+        if (Object.keys(tleData).length === 0) return;
+
+        const calculatePositions = () => {
+          const now = new Date();
+          const newPositions = [];
+
+          for (const [key, sat] of Object.entries(tleData)) {
+            if (!sat.tle1 || !sat.tle2) continue;
+
+            try {
+              // Parse TLE and create satellite record
+              const satrec = satellite.twoline2satrec(sat.tle1, sat.tle2);
+              
+              // Get current position
+              const positionAndVelocity = satellite.propagate(satrec, now);
+              if (!positionAndVelocity.position) continue;
+
+              // Convert to geodetic coordinates
+              const gmst = satellite.gstime(now);
+              const position = satellite.eciToGeodetic(positionAndVelocity.position, gmst);
+              
+              const lat = satellite.degreesLat(position.latitude);
+              const lon = satellite.degreesLong(position.longitude);
+              const alt = position.height; // km
+
+              // Calculate if satellite is visible from DE location (above horizon)
+              const lookAngles = satellite.ecfToLookAngles(
+                { latitude: deLocation.lat * Math.PI / 180, longitude: deLocation.lon * Math.PI / 180, height: 0 },
+                satellite.eciToEcf(positionAndVelocity.position, gmst)
+              );
+              const elevation = lookAngles.elevation * 180 / Math.PI;
+              const azimuth = lookAngles.azimuth * 180 / Math.PI;
+              const isVisible = elevation > 0;
+
+              // Calculate orbit track (next 90 minutes, point every minute)
+              const track = [];
+              for (let m = -30; m <= 60; m += 2) {
+                const futureTime = new Date(now.getTime() + m * 60000);
+                const futurePos = satellite.propagate(satrec, futureTime);
+                if (futurePos.position) {
+                  const futureGmst = satellite.gstime(futureTime);
+                  const futureGeo = satellite.eciToGeodetic(futurePos.position, futureGmst);
+                  track.push([
+                    satellite.degreesLat(futureGeo.latitude),
+                    satellite.degreesLong(futureGeo.longitude)
+                  ]);
+                }
+              }
+
+              newPositions.push({
+                key,
+                name: sat.name,
+                color: sat.color,
+                lat,
+                lon,
+                alt: Math.round(alt),
+                elevation: elevation.toFixed(1),
+                azimuth: azimuth.toFixed(1),
+                isVisible,
+                track
+              });
+            } catch (e) {
+              // Skip satellites with calculation errors
+            }
+          }
+
+          setPositions(newPositions);
+        };
+
+        calculatePositions();
+        const interval = setInterval(calculatePositions, 2000); // Update every 2 seconds
+        return () => clearInterval(interval);
+      }, [tleData, deLocation.lat, deLocation.lon]);
+
+      return { positions, loading };
+    };
+
+    // ============================================
     // PROPAGATION PANEL COMPONENT (Toggleable views)
     // ============================================
     const PropagationPanel = ({ propagation, loading }) => {
@@ -1225,7 +1338,7 @@
     // ============================================
     // LEAFLET MAP COMPONENT
     // ============================================
-    const WorldMap = ({ deLocation, dxLocation, onDXChange, potaSpots, mySpots }) => {
+    const WorldMap = ({ deLocation, dxLocation, onDXChange, potaSpots, mySpots, satellites }) => {
       const mapRef = useRef(null);
       const mapInstanceRef = useRef(null);
       const tileLayerRef = useRef(null);
@@ -1237,7 +1350,10 @@
       const potaMarkersRef = useRef([]);
       const mySpotsMarkersRef = useRef([]);
       const mySpotsLinesRef = useRef([]);
+      const satMarkersRef = useRef([]);
+      const satTracksRef = useRef([]);
       const [mapStyle, setMapStyle] = useState('dark');
+      const [showSatellites, setShowSatellites] = useState(true);
 
       // Initialize map
       useEffect(() => {
@@ -1477,6 +1593,93 @@
         });
       }, [potaSpots]);
 
+      // Update satellite markers and tracks
+      useEffect(() => {
+        if (!mapInstanceRef.current) return;
+        const map = mapInstanceRef.current;
+
+        // Remove old satellite markers and tracks
+        satMarkersRef.current.forEach(m => map.removeLayer(m));
+        satMarkersRef.current = [];
+        satTracksRef.current.forEach(t => map.removeLayer(t));
+        satTracksRef.current = [];
+
+        // Add satellite markers and tracks if enabled
+        if (showSatellites && satellites && satellites.length > 0) {
+          satellites.forEach(sat => {
+            // Draw orbit track
+            if (sat.track && sat.track.length > 1) {
+              // Split track at antimeridian crossings
+              let segments = [];
+              let currentSegment = [sat.track[0]];
+              
+              for (let i = 1; i < sat.track.length; i++) {
+                const prevLon = sat.track[i-1][1];
+                const currLon = sat.track[i][1];
+                
+                if (Math.abs(currLon - prevLon) > 180) {
+                  segments.push(currentSegment);
+                  currentSegment = [];
+                }
+                currentSegment.push(sat.track[i]);
+              }
+              segments.push(currentSegment);
+              
+              segments.forEach(segment => {
+                if (segment.length > 1) {
+                  const track = L.polyline(segment, {
+                    color: sat.color,
+                    weight: 1.5,
+                    opacity: 0.5,
+                    dashArray: '4, 8'
+                  }).addTo(map);
+                  satTracksRef.current.push(track);
+                }
+              });
+            }
+
+            // Create satellite marker
+            const isISS = sat.key === 'ISS';
+            const icon = L.divIcon({
+              className: '',
+              html: `<div style="
+                background: ${sat.color}; 
+                color: #000; 
+                padding: ${isISS ? '4px 8px' : '2px 6px'}; 
+                border-radius: 4px; 
+                font-size: ${isISS ? '12px' : '10px'}; 
+                font-family: JetBrains Mono; 
+                white-space: nowrap; 
+                border: 2px solid ${sat.isVisible ? '#fff' : 'rgba(255,255,255,0.3)'}; 
+                font-weight: bold;
+                opacity: ${sat.isVisible ? 1 : 0.6};
+                box-shadow: ${sat.isVisible ? '0 0 10px ' + sat.color : 'none'};
+              ">🛰 ${sat.key}</div>`,
+              iconAnchor: [isISS ? 35 : 25, 12]
+            });
+            
+            const marker = L.marker([sat.lat, sat.lon], { icon, zIndexOffset: isISS ? 1000 : 500 })
+              .bindPopup(`
+                <div style="font-family: JetBrains Mono; font-size: 12px;">
+                  <b style="color: ${sat.color}; font-size: 14px;">🛰 ${sat.name}</b><br>
+                  <div style="margin-top: 6px;">
+                    <b>Altitude:</b> ${sat.alt} km<br>
+                    <b>Position:</b> ${sat.lat.toFixed(2)}°, ${sat.lon.toFixed(2)}°<br>
+                    ${sat.isVisible ? 
+                      `<span style="color: #00ff88;"><b>✓ VISIBLE</b></span><br>
+                       <b>Azimuth:</b> ${sat.azimuth}°<br>
+                       <b>Elevation:</b> ${sat.elevation}°` :
+                      `<span style="color: #888;">Below horizon</span>`
+                    }
+                  </div>
+                </div>
+              `)
+              .addTo(map);
+            satMarkersRef.current.push(marker);
+          });
+        }
+      }, [satellites, showSatellites]);
+
       return (
         <div style={{ position: 'relative', height: '100%', minHeight: '200px' }}>
           <div ref={mapRef} style={{ height: '100%', width: '100%', borderRadius: '8px' }} />
@@ -1493,6 +1696,30 @@
               </button>
             ))}
           </div>
+          
+          {/* Satellite toggle */}
+          <button
+            onClick={() => setShowSatellites(!showSatellites)}
+            style={{
+              position: 'absolute',
+              top: '10px',
+              left: '50px',
+              background: showSatellites ? 'rgba(0, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.7)',
+              border: `1px solid ${showSatellites ? '#00ffff' : '#666'}`,
+              color: showSatellites ? '#00ffff' : '#888',
+              padding: '6px 10px',
+              borderRadius: '4px',
+              fontSize: '11px',
+              fontFamily: 'JetBrains Mono',
+              cursor: 'pointer',
+              zIndex: 1000,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px'
+            }}
+          >
+            🛰 {showSatellites ? 'SATS ON' : 'SATS OFF'}
+          </button>
         </div>
       );
     };
@@ -1792,7 +2019,7 @@
     const LegacyLayout = ({ 
       config, currentTime, utcTime, utcDate, localTime, localDate,
       deGrid, dxGrid, deSunTimes, dxSunTimes, dxLocation, onDXChange,
-      spaceWeather, bandConditions, potaSpots, dxCluster, contests, propagation, mySpots,
+      spaceWeather, bandConditions, potaSpots, dxCluster, contests, propagation, mySpots, satellites,
       onSettingsClick
     }) => {
       const bearing = calculateBearing(config.location.lat, config.location.lon, dxLocation.lat, dxLocation.lon);
@@ -1953,6 +2180,7 @@
               onDXChange={onDXChange} 
               potaSpots={potaSpots.data}
               mySpots={mySpots.data}
+              satellites={satellites.positions}
             />
           </div>
 
@@ -2403,6 +2631,7 @@
       const contests = useContests();
       const propagation = usePropagation(config.location, dxLocation);
       const mySpots = useMySpots(config.callsign);
+      const satellites = useSatellites(config.location);
 
       const deGrid = useMemo(() => calculateGridSquare(config.location.lat, config.location.lon), [config.location]);
       const dxGrid = useMemo(() => calculateGridSquare(dxLocation.lat, dxLocation.lon), [dxLocation]);
@@ -2454,6 +2683,7 @@
               contests={contests}
               propagation={propagation}
               mySpots={mySpots}
+              satellites={satellites}
               onSettingsClick={() => setShowSettings(true)}
             />
             <SettingsPanel 
@@ -2599,7 +2829,7 @@
           
           {/* CENTER - MAP */}
           <div style={{ position: 'relative', borderRadius: '6px', overflow: 'hidden' }}>
-            <WorldMap deLocation={config.location} dxLocation={dxLocation} onDXChange={handleDXChange} potaSpots={potaSpots.data} mySpots={mySpots.data} />
+            <WorldMap deLocation={config.location} dxLocation={dxLocation} onDXChange={handleDXChange} potaSpots={potaSpots.data} mySpots={mySpots.data} satellites={satellites.positions} />
             <div style={{ position: 'absolute', bottom: '8px', left: '50%', transform: 'translateX(-50%)', fontSize: '13px', color: 'var(--text-muted)', background: 'rgba(0,0,0,0.7)', padding: '2px 8px', borderRadius: '4px' }}>
               Click map to set DX • 73 de {config.callsign}
             </div>
