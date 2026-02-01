@@ -175,7 +175,7 @@ Path.month ${month}
 Path.hour ${isNaN(hour) ? 12 : (hour === 0 ? 24 : hour)}
 Path.SSN ${ssn}
 Path.frequency ${freqList}
-Path.txpower ${(10 * Math.log10(txPower / 1000)).toFixed(1)}
+Path.txpower ${(10 * Math.log10(txPower)).toFixed(1)}
 Path.BW 3000
 Path.SNRr ${requiredSNR}
 Path.SNRXXp ${requiredReliability}
@@ -507,7 +507,7 @@ Path.month 6
 Path.hour 12
 Path.SSN 100
 Path.frequency 14.0
-Path.txpower -10.0
+Path.txpower 20.0
 Path.BW 3000
 Path.SNRr 15
 Path.SNRXXp 90
