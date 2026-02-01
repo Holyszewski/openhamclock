@@ -175,35 +175,42 @@ docker compose up -d
 
 For the complete hybrid propagation system, deploy all three services:
 
-**1. Main OpenHamClock Service**
-```bash
-# From repository root
-railway init
-railway up
+**1. Deploy ITURHFProp Service First** (enables hybrid propagation)
+```
+├── Go to railway.app → New Project → Deploy from GitHub repo
+├── Select your forked repository  
+├── Click "Add Service" → "GitHub Repo" (same repo)
+├── In service settings, set "Root Directory" to: iturhfprop-service
+├── If Root Directory option not visible:
+│     - Go to Service → Settings → Build
+│     - Add "Root Directory" and enter: iturhfprop-service
+├── Deploy and wait for build to complete (~2-3 min)
+└── Copy the public URL (Settings → Networking → Generate Domain)
 ```
 
-**2. DX Spider Proxy** (optional - enables live DX cluster paths)
-```bash
-cd dxspider-proxy
-railway init
-railway up
-# Note the URL, e.g., https://dxspider-proxy-xxxx.railway.app
+**2. Deploy DX Spider Proxy** (optional - for live DX cluster paths)
+```
+├── In same project, click "Add Service" → "GitHub Repo"
+├── Set "Root Directory" to: dxspider-proxy  
+└── Deploy
 ```
 
-**3. ITURHFProp Service** (optional - enables hybrid propagation)
-```bash
-cd iturhfprop-service
-railway init
-railway up
-# Note the URL, e.g., https://iturhfprop-xxxx.railway.app
+**3. Deploy Main OpenHamClock**
+```
+├── In same project, click "Add Service" → "GitHub Repo"
+├── Leave Root Directory empty (uses repo root)
+├── Go to Variables tab, add:
+│     ITURHFPROP_URL = https://[your-iturhfprop-service].up.railway.app
+└── Deploy
 ```
 
-**4. Link Services**
+#### Alternative: Separate Projects
 
-In the main OpenHamClock service, add environment variable:
-```
-ITURHFPROP_URL=https://your-iturhfprop-service.railway.app
-```
+If Root Directory doesn't work, create separate Railway projects:
+1. Fork the repo 3 times (or use branches)
+2. Move each service to its own repo root
+3. Deploy each as separate Railway project
+4. Link via environment variables
 
 ---
 

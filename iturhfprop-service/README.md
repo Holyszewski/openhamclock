@@ -1,6 +1,6 @@
 # ITURHFProp Service
 
-REST API wrapper for the [ITURHFProp](https://github.com/G4FKH/ITURHFProp) HF propagation prediction engine, implementing **ITU-R P.533-14** "Method for the prediction of the performance of HF circuits".
+REST API wrapper for the [ITURHFProp](https://github.com/ITU-R-Study-Group-3/ITU-R-HF) HF propagation prediction engine, implementing **ITU-R P.533-14** "Method for the prediction of the performance of HF circuits".
 
 ## Overview
 
@@ -9,8 +9,8 @@ This microservice provides HF propagation predictions as a REST API, suitable fo
 ### Why ITURHFProp?
 
 - **ITU-R P.533-14 Compliant** - The international standard for HF prediction
-- **Open Source** - BSD licensed, freely available
-- **Accurate** - Used by professional HF planning tools
+- **Official ITU Release** - From ITU-R Study Group 3
+- **Pre-built Binaries** - No compilation required
 - **No API Restrictions** - Unlike web services, you control the engine
 
 ## API Endpoints
@@ -115,17 +115,18 @@ curl http://localhost:3000/api/health
 
 ### Local Development
 
-Requires ITURHFProp to be installed locally:
+Download ITURHFProp binaries from the [official release](https://github.com/ITU-R-Study-Group-3/ITU-R-HF/releases):
 
 ```bash
-# Install ITURHFProp (Linux)
-git clone https://github.com/G4FKH/ITURHFProp.git
-cd ITURHFProp/Linux
-make
+# Download binaries and data
+wget https://github.com/ITU-R-Study-Group-3/ITU-R-HF/releases/download/v14.2/ITURHFProp_14_02.zip
+wget https://github.com/ITU-R-Study-Group-3/ITU-R-HF/releases/download/v14.2/Data.zip
+unzip ITURHFProp_14_02.zip
+unzip Data.zip
 
 # Set environment variables
-export ITURHFPROP_PATH=/path/to/ITURHFProp/Linux/ITURHFProp
-export ITURHFPROP_DATA=/path/to/ITURHFProp/Data
+export ITURHFPROP_PATH=$(pwd)/ITURHFProp
+export ITURHFPROP_DATA=$(pwd)/Data
 
 # Run service
 npm install
@@ -187,12 +188,13 @@ For real-time enhancement, combine with ionosonde data from KC2G/GIRO network.
 
 This service wrapper is MIT licensed.
 
-ITURHFProp is BSD licensed - see [G4FKH/ITURHFProp](https://github.com/G4FKH/ITURHFProp) for details.
+ITURHFProp is provided by ITU-R Study Group 3 - see [ITU-R-Study-Group-3/ITU-R-HF](https://github.com/ITU-R-Study-Group-3/ITU-R-HF) for details.
 
 ## Credits
 
-- **ITURHFProp** by G4FKH (Martin) - The core prediction engine
-- **ITU-R P.533** - International Telecommunication Union recommendation
+- **ITURHFProp** by ITU-R Study Group 3 - The core prediction engine
+- **ITU-R P.533-14** - International Telecommunication Union recommendation  
+- **Chris Behm & George Engelbrecht** - Original ITURHFProp developers
 - **OpenHamClock** - Integration target
 
 ---

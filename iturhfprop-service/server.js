@@ -21,7 +21,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Paths to ITURHFProp
-const ITURHFPROP_PATH = process.env.ITURHFPROP_PATH || '/opt/iturhfprop/Linux/ITURHFProp';
+const ITURHFPROP_PATH = process.env.ITURHFPROP_PATH || '/opt/iturhfprop/ITURHFProp';
 const ITURHFPROP_DATA = process.env.ITURHFPROP_DATA || '/opt/iturhfprop/Data';
 
 // Temp directory for input/output files
