@@ -1,219 +1,222 @@
 # Contributing to OpenHamClock
 
-First off, thank you for considering contributing to OpenHamClock! It's people like you that make the amateur radio community great. 73!
+Thank you for your interest in contributing! This document explains how to work with the modular codebase.
 
-## Table of Contents
+## 📐 Architecture Overview
 
-- [Code of Conduct](#code-of-conduct)
-- [Getting Started](#getting-started)
-- [How Can I Contribute?](#how-can-i-contribute)
-- [Development Setup](#development-setup)
-- [Pull Request Process](#pull-request-process)
-- [Style Guidelines](#style-guidelines)
+OpenHamClock uses a clean separation of concerns:
 
-## Code of Conduct
+```
+src/
+├── components/    # React UI components
+├── hooks/         # Data fetching & state management
+├── utils/         # Pure utility functions
+└── styles/        # CSS with theme variables
+```
 
-This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainers.
+## 🔧 Working on Components
 
-## Getting Started
+Each component is self-contained in its own file. To modify a component:
 
-### Issues
+1. Open the component file in `src/components/`
+2. Make your changes
+3. Test with `npm run dev`
+4. Ensure all three themes still work
 
-- **Bug Reports**: If you find a bug, please create an issue with a clear title and description. Include as much relevant information as possible, including steps to reproduce.
-- **Feature Requests**: We welcome feature suggestions! Open an issue describing the feature and why it would be useful.
-- **Questions**: Use GitHub Discussions for questions about usage or development.
+### Component Guidelines
 
-### Good First Issues
+```jsx
+// Good component structure
+export const MyComponent = ({ prop1, prop2, onAction }) => {
+  // Hooks at the top
+  const [state, setState] = useState(initial);
+  
+  // Event handlers
+  const handleClick = () => {
+    onAction?.(state);
+  };
+  
+  // Early returns for loading/empty states
+  if (!prop1) return null;
+  
+  // Main render
+  return (
+    <div className="panel">
+      {/* Use CSS variables for colors */}
+      <div style={{ color: 'var(--accent-cyan)' }}>
+        {prop1}
+      </div>
+    </div>
+  );
+};
+```
 
-Looking for something to work on? Check out issues labeled [`good first issue`](https://github.com/accius/openhamclock/labels/good%20first%20issue) - these are great for newcomers!
+## 🪝 Working on Hooks
 
-## How Can I Contribute?
+Hooks handle data fetching and state. Each hook:
+- Fetches from a specific API endpoint
+- Manages loading state
+- Handles errors gracefully
+- Returns consistent shape: `{ data, loading, error? }`
 
-### Reporting Bugs
+### Hook Guidelines
 
-Before creating a bug report, please check existing issues to avoid duplicates. When you create a bug report, include:
+```jsx
+// Good hook structure
+export const useMyData = (param) => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-- **Clear title** describing the issue
-- **Steps to reproduce** the behavior
-- **Expected behavior** vs **actual behavior**
-- **Screenshots** if applicable
-- **Environment details**: OS, browser, Node.js version, Pi model, etc.
+  useEffect(() => {
+    if (!param) {
+      setLoading(false);
+      return;
+    }
 
-### Suggesting Features
+    const fetchData = async () => {
+      try {
+        const response = await fetch(`/api/endpoint/${param}`);
+        if (response.ok) {
+          const result = await response.json();
+          setData(result);
+        }
+      } catch (err) {
+        console.error('MyData error:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-We love hearing ideas from the community! When suggesting a feature:
+    fetchData();
+    const interval = setInterval(fetchData, 30000); // 30 sec refresh
+    return () => clearInterval(interval);
+  }, [param]);
 
-- **Use a clear title** for the issue
-- **Provide a detailed description** of the proposed feature
-- **Explain the use case** - how would this benefit ham radio operators?
-- **Consider implementation** - any ideas on how to build it?
+  return { data, loading };
+};
+```
 
-### Priority Contribution Areas
+## 🛠️ Working on Utilities
 
-We especially welcome contributions in these areas:
+Utilities are pure functions with no side effects:
 
-1. **Satellite Tracking**
-   - TLE parsing and SGP4 propagation
-   - Pass predictions and AOS/LOS times
-   - Satellite footprint visualization
+```jsx
+// Good utility
+export const calculateSomething = (input1, input2) => {
+  // Pure calculation, no API calls or DOM access
+  return result;
+};
+```
 
-2. **Real-time DX Cluster**
-   - WebSocket connection to Telnet clusters
-   - Spot filtering and alerting
-   - Clickable spots to set DX
+## 🎨 CSS & Theming
 
-3. **Contest Integration**
-   - Contest calendar from WA7BNM or similar
-   - Contest-specific band plans
-   - Rate/multiplier tracking
+Use CSS variables for all colors:
 
-4. **Hardware Integration**
-   - Hamlib radio control (frequency, mode)
-   - Rotator control
-   - External GPIO for Pi (PTT, etc.)
+```css
+/* ✅ Good - uses theme variable */
+.my-element {
+  color: var(--accent-cyan);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+}
 
-5. **Accessibility**
-   - Screen reader support
-   - High contrast themes
-   - Keyboard navigation
+/* ❌ Bad - hardcoded color */
+.my-element {
+  color: #00ddff;
+}
+```
 
-6. **Internationalization**
-   - Translation framework
-   - Localized date/time formats
-   - Multi-language support
+Available theme variables:
+- `--bg-primary`, `--bg-secondary`, `--bg-tertiary`, `--bg-panel`
+- `--border-color`
+- `--text-primary`, `--text-secondary`, `--text-muted`
+- `--accent-amber`, `--accent-green`, `--accent-red`, `--accent-blue`, `--accent-cyan`, `--accent-purple`
 
-## Development Setup
+## 📝 Adding a New Feature
 
-### Prerequisites
+### New Component
 
-- Node.js 18 or later
-- Git
-- A modern web browser
+1. Create `src/components/MyComponent.jsx`
+2. Export from `src/components/index.js`
+3. Import and use in `App.jsx`
 
-### Local Development
+### New Hook
+
+1. Create `src/hooks/useMyHook.js`
+2. Export from `src/hooks/index.js`
+3. Import and use in component
+
+### New Utility
+
+1. Add function to appropriate file in `src/utils/`
+2. Export from `src/utils/index.js`
+3. Import where needed
+
+## 🧪 Testing Your Changes
 
 ```bash
-# Clone your fork
-git clone https://github.com/YOUR_USERNAME/openhamclock.git
-cd openhamclock
+# Start dev servers
+node server.js  # Terminal 1
+npm run dev     # Terminal 2
 
-# Add upstream remote
-git remote add upstream https://github.com/accius/openhamclock.git
-
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev
-
-# In another terminal, run Electron (optional)
-npm run electron
+# Test checklist:
+# [ ] Component renders correctly
+# [ ] Works in Dark theme
+# [ ] Works in Light theme
+# [ ] Works in Legacy theme
+# [ ] Responsive on smaller screens
+# [ ] No console errors
+# [ ] Data fetches correctly
 ```
 
-### Project Structure
+## 📋 Pull Request Checklist
 
-```
-openhamclock/
-├── public/index.html    # Main application (React + Leaflet)
-├── server.js            # Express API proxy server
-├── electron/main.js     # Desktop app wrapper
-├── scripts/             # Platform setup scripts
-└── package.json         # Dependencies and scripts
-```
+- [ ] Code follows existing patterns
+- [ ] All themes work correctly
+- [ ] No console errors/warnings
+- [ ] Component is exported from index.js
+- [ ] Added JSDoc comments if needed
+- [ ] Tested on different screen sizes
 
-### Making Changes
+## 🐛 Reporting Bugs
 
-1. Create a new branch from `main`:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
+1. Check existing issues first
+2. Include browser and screen size
+3. Include console errors if any
+4. Include steps to reproduce
 
-2. Make your changes
+## 💡 Feature Requests
 
-3. Test thoroughly:
-   - Test in multiple browsers (Chrome, Firefox, Safari)
-   - Test on desktop and mobile viewports
-   - Test the Electron app if applicable
-   - Verify API proxy endpoints work
+1. Describe the feature
+2. Explain the use case
+3. Show how it would work (mockups welcome)
 
-4. Commit with clear messages:
-   ```bash
-   git commit -m "Add satellite tracking panel with TLE parser"
-   ```
+## 🏗️ Reference Implementation
 
-## Pull Request Process
+The original monolithic version is preserved at `public/index-monolithic.html` (5714 lines). Use it as reference for:
 
-1. **Update documentation** if needed (README, inline comments)
+- Line numbers for each feature section
+- Complete implementation details
+- Original styling decisions
 
-2. **Ensure your code follows style guidelines** (see below)
+### Key Sections in Monolithic Version
 
-3. **Test your changes** on multiple platforms if possible
+| Lines | Section |
+|-------|---------|
+| 30-335 | CSS styles & themes |
+| 340-640 | Config & map providers |
+| 438-636 | Utility functions (geo) |
+| 641-691 | useSpaceWeather |
+| 721-810 | useBandConditions |
+| 812-837 | usePOTASpots |
+| 839-1067 | DX cluster filters & helpers |
+| 1069-1696 | useDXCluster with filtering |
+| 2290-3022 | WorldMap component |
+| 3024-3190 | Header component |
+| 3195-3800 | DXFilterManager |
+| 3800-4200 | SettingsPanel |
+| 5019-5714 | Main App & rendering |
 
-4. **Create the Pull Request**:
-   - Use a clear, descriptive title
-   - Reference any related issues (`Fixes #123`)
-   - Describe what changes you made and why
-   - Include screenshots for UI changes
+## 📜 License
 
-5. **Respond to feedback** - maintainers may request changes
-
-6. **Once approved**, a maintainer will merge your PR
-
-### PR Title Format
-
-Use conventional commit style:
-- `feat: Add satellite tracking panel`
-- `fix: Correct timezone calculation for DST`
-- `docs: Update Pi installation instructions`
-- `style: Improve mobile responsive layout`
-- `refactor: Simplify API proxy endpoints`
-
-## Style Guidelines
-
-### JavaScript
-
-- Use modern ES6+ syntax
-- Prefer `const` over `let`, avoid `var`
-- Use meaningful variable and function names
-- Add comments for complex logic
-- Keep functions focused and small
-
-### CSS
-
-- Use CSS custom properties (variables) for theming
-- Follow the existing naming conventions
-- Prefer flexbox/grid over floats
-- Test responsive breakpoints
-
-### React Components
-
-- Use functional components with hooks
-- Keep components focused on single responsibilities
-- Extract reusable logic into custom hooks
-- Use meaningful prop names
-
-### Git Commits
-
-- Write clear, concise commit messages
-- Use present tense ("Add feature" not "Added feature")
-- Reference issues when applicable
-
-## Recognition
-
-Contributors will be recognized in:
-- The README contributors section
-- Release notes for significant contributions
-- The project's GitHub contributors page
-
-## Questions?
-
-Feel free to:
-- Open a GitHub Discussion
-- Email chris@cjhlighting.com
-- Reach out to maintainers
-
----
-
-**73 and thanks for contributing to OpenHamClock!**
-
-*In memory of Elwood Downey, WB0OEW*
+By contributing, you agree that your contributions will be licensed under the MIT License.

@@ -1,96 +1,39 @@
 {
   "name": "openhamclock",
-  "version": "3.9.0",
-  "description": "Open-source amateur radio dashboard with real-time space weather, band conditions, DX cluster, and interactive world map",
+  "version": "3.7.0",
+  "description": "Amateur Radio Dashboard - A modern web-based HamClock alternative",
   "main": "server.js",
+  "type": "module",
   "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "start": "node server.js",
-    "dev": "node server.js",
-    "electron": "electron electron/main.js",
-    "electron:build": "electron-builder",
-    "electron:build:win": "electron-builder --win",
-    "electron:build:mac": "electron-builder --mac",
-    "electron:build:linux": "electron-builder --linux",
-    "electron:build:pi": "electron-builder --linux --armv7l",
-    "docker:build": "docker build -t openhamclock .",
-    "docker:run": "docker run -p 3000:3000 openhamclock",
-    "setup:pi": "bash scripts/setup-pi.sh",
-    "setup:linux": "bash scripts/setup-linux.sh",
-    "test": "echo \"No tests yet\" && exit 0"
+    "server": "node server.js"
   },
-  "keywords": [
-    "ham-radio",
-    "amateur-radio",
-    "hamclock",
-    "dx-cluster",
-    "space-weather",
-    "pota",
-    "sota",
-    "propagation",
-    "raspberry-pi",
-    "electron"
-  ],
-  "author": "OpenHamClock Contributors",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/accius/openhamclock.git"
-  },
-  "bugs": {
-    "url": "https://github.com/accius/openhamclock/issues"
-  },
-  "homepage": "https://github.com/accius/openhamclock#readme",
   "dependencies": {
-    "express": "^4.18.2",
+    "axios": "^1.6.2",
     "cors": "^2.8.5",
-    "node-fetch": "^2.7.0"
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "satellite.js": "^5.0.0",
+    "ws": "^8.14.2"
   },
   "devDependencies": {
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.1"
+    "@vitejs/plugin-react": "^4.2.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "vite": "^5.0.10"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "build": {
-    "appId": "com.openhamclock.app",
-    "productName": "OpenHamClock",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "public/**/*",
-      "electron/**/*",
-      "server.js",
-      "package.json"
-    ],
-    "mac": {
-      "category": "public.app-category.utilities",
-      "icon": "public/icons/icon.icns",
-      "target": [
-        "dmg",
-        "zip"
-      ]
-    },
-    "win": {
-      "icon": "public/icons/icon.ico",
-      "target": [
-        "nsis",
-        "portable"
-      ]
-    },
-    "linux": {
-      "icon": "public/icons",
-      "target": [
-        "AppImage",
-        "deb",
-        "rpm"
-      ],
-      "category": "Utility"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
-    }
-  }
+  "keywords": [
+    "amateur-radio",
+    "ham-radio",
+    "hamclock",
+    "dx-cluster",
+    "propagation",
+    "pota",
+    "satellite-tracking"
+  ],
+  "author": "K0CJH",
+  "license": "MIT"
 }

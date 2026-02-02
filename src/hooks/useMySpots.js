@@ -1,0 +1,40 @@
+/**
+ * useMySpots Hook
+ * Fetches spots where user's callsign appears (spotted or was spotted)
+ */
+import { useState, useEffect } from 'react';
+
+export const useMySpots = (callsign) => {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!callsign || callsign === 'N0CALL') {
+      setData([]);
+      setLoading(false);
+      return;
+    }
+
+    const fetchMySpots = async () => {
+      try {
+        const response = await fetch(`/api/myspots/${encodeURIComponent(callsign)}`);
+        if (response.ok) {
+          const spots = await response.json();
+          setData(spots);
+        }
+      } catch (err) {
+        console.error('My spots error:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchMySpots();
+    const interval = setInterval(fetchMySpots, 30000); // 30 seconds
+    return () => clearInterval(interval);
+  }, [callsign]);
+
+  return { data, loading };
+};
+
+export default useMySpots;
