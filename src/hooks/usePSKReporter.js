@@ -1,12 +1,12 @@
 /**
  * usePSKReporter Hook
- * Fetches PSKReporter data showing where your digital mode signals are being received
+ * Fetches PSKReporter data via MQTT WebSocket connection
  * 
- * Uses HTTP API with server-side caching to respect PSKReporter rate limits.
- * 
- * For real-time MQTT updates, see mqtt.pskreporter.info (requires mqtt.js library)
+ * Uses real-time MQTT feed from mqtt.pskreporter.info for live spots
+ * No HTTP API calls - direct WebSocket connection from browser
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import mqtt from 'mqtt';
 
 // Convert grid square to lat/lon
 function gridToLatLon(grid) {
@@ -31,116 +31,287 @@ function gridToLatLon(grid) {
   return { lat: finalLat, lon: finalLon };
 }
 
+// Get band name from frequency in Hz
+function getBandFromHz(freqHz) {
+  const freqMHz = freqHz / 1000000;
+  if (freqMHz >= 1.8 && freqMHz <= 2) return '160m';
+  if (freqMHz >= 3.5 && freqMHz <= 4) return '80m';
+  if (freqMHz >= 5.3 && freqMHz <= 5.4) return '60m';
+  if (freqMHz >= 7 && freqMHz <= 7.3) return '40m';
+  if (freqMHz >= 10.1 && freqMHz <= 10.15) return '30m';
+  if (freqMHz >= 14 && freqMHz <= 14.35) return '20m';
+  if (freqMHz >= 18.068 && freqMHz <= 18.168) return '17m';
+  if (freqMHz >= 21 && freqMHz <= 21.45) return '15m';
+  if (freqMHz >= 24.89 && freqMHz <= 24.99) return '12m';
+  if (freqMHz >= 28 && freqMHz <= 29.7) return '10m';
+  if (freqMHz >= 50 && freqMHz <= 54) return '6m';
+  if (freqMHz >= 144 && freqMHz <= 148) return '2m';
+  if (freqMHz >= 420 && freqMHz <= 450) return '70cm';
+  return 'Unknown';
+}
+
 export const usePSKReporter = (callsign, options = {}) => {
   const {
-    minutes = 15,           // Time window in minutes (default 15)
+    minutes = 15,           // Time window to keep spots
     enabled = true,         // Enable/disable fetching
-    refreshInterval = 300000, // Refresh every 5 minutes (PSKReporter friendly)
-    maxSpots = 100          // Max spots to display
+    maxSpots = 100          // Max spots to keep
   } = options;
 
   const [txReports, setTxReports] = useState([]);
   const [rxReports, setRxReports] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [connected, setConnected] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(null);
+  const [source, setSource] = useState('connecting');
+  
+  const clientRef = useRef(null);
+  const txReportsRef = useRef([]);
+  const rxReportsRef = useRef([]);
+  const mountedRef = useRef(true);
 
-  const fetchData = useCallback(async () => {
+  // Clean old spots (older than specified minutes)
+  const cleanOldSpots = useCallback((spots, maxAgeMinutes) => {
+    const cutoff = Date.now() - (maxAgeMinutes * 60 * 1000);
+    return spots.filter(s => s.timestamp > cutoff).slice(0, maxSpots);
+  }, [maxSpots]);
+
+  // Process incoming MQTT message
+  const processMessage = useCallback((topic, message) => {
+    if (!mountedRef.current) return;
+    
+    try {
+      const data = JSON.parse(message.toString());
+      
+      // PSKReporter MQTT message format
+      // sa=sender callsign, sl=sender locator, ra=receiver callsign, rl=receiver locator
+      // f=frequency, md=mode, rp=snr (report), t=timestamp
+      const {
+        sa: senderCallsign,
+        sl: senderLocator,
+        ra: receiverCallsign,
+        rl: receiverLocator,
+        f: frequency,
+        md: mode,
+        rp: snr,
+        t: timestamp
+      } = data;
+
+      if (!senderCallsign || !receiverCallsign) return;
+
+      const senderLoc = gridToLatLon(senderLocator);
+      const receiverLoc = gridToLatLon(receiverLocator);
+      const freq = parseInt(frequency) || 0;
+      const now = Date.now();
+      
+      const report = {
+        sender: senderCallsign,
+        senderGrid: senderLocator,
+        receiver: receiverCallsign,
+        receiverGrid: receiverLocator,
+        freq,
+        freqMHz: freq ? (freq / 1000000).toFixed(3) : '?',
+        band: getBandFromHz(freq),
+        mode: mode || 'Unknown',
+        snr: snr !== undefined ? parseInt(snr) : null,
+        timestamp: timestamp ? timestamp * 1000 : now,
+        age: 0,
+        lat: null,
+        lon: null
+      };
+
+      const upperCallsign = callsign?.toUpperCase();
+      if (!upperCallsign) return;
+      
+      // If I'm the sender, this is a TX report (someone heard me)
+      if (senderCallsign.toUpperCase() === upperCallsign) {
+        report.lat = receiverLoc?.lat;
+        report.lon = receiverLoc?.lon;
+        
+        // Add to front, dedupe by receiver+freq, limit size
+        txReportsRef.current = [report, ...txReportsRef.current]
+          .filter((r, i, arr) => 
+            i === arr.findIndex(x => x.receiver === r.receiver && Math.abs(x.freq - r.freq) < 1000)
+          )
+          .slice(0, maxSpots);
+        
+        setTxReports(cleanOldSpots([...txReportsRef.current], minutes));
+        setLastUpdate(new Date());
+      }
+      
+      // If I'm the receiver, this is an RX report (I heard someone)
+      if (receiverCallsign.toUpperCase() === upperCallsign) {
+        report.lat = senderLoc?.lat;
+        report.lon = senderLoc?.lon;
+        
+        rxReportsRef.current = [report, ...rxReportsRef.current]
+          .filter((r, i, arr) => 
+            i === arr.findIndex(x => x.sender === r.sender && Math.abs(x.freq - r.freq) < 1000)
+          )
+          .slice(0, maxSpots);
+        
+        setRxReports(cleanOldSpots([...rxReportsRef.current], minutes));
+        setLastUpdate(new Date());
+      }
+      
+    } catch (err) {
+      // Silently ignore parse errors - malformed messages happen
+    }
+  }, [callsign, minutes, maxSpots, cleanOldSpots]);
+
+  // Connect to MQTT
+  useEffect(() => {
+    mountedRef.current = true;
+    
     if (!callsign || callsign === 'N0CALL' || !enabled) {
       setTxReports([]);
       setRxReports([]);
       setLoading(false);
+      setSource('disabled');
+      setConnected(false);
       return;
     }
 
-    try {
+    const upperCallsign = callsign.toUpperCase();
+    
+    // Clear old data
+    txReportsRef.current = [];
+    rxReportsRef.current = [];
+    setTxReports([]);
+    setRxReports([]);
+    setLoading(true);
+    setError(null);
+    setSource('connecting');
+
+    console.log(`[PSKReporter MQTT] Connecting for ${upperCallsign}...`);
+
+    // Connect to PSKReporter MQTT via WebSocket
+    const client = mqtt.connect('wss://mqtt.pskreporter.info:1886/mqtt', {
+      clientId: `ohc_${upperCallsign}_${Math.random().toString(16).substr(2, 6)}`,
+      clean: true,
+      connectTimeout: 15000,
+      reconnectPeriod: 60000,
+      keepalive: 60
+    });
+
+    clientRef.current = client;
+
+    client.on('connect', () => {
+      if (!mountedRef.current) return;
+      
+      console.log('[PSKReporter MQTT] Connected!');
+      setConnected(true);
+      setLoading(false);
+      setSource('mqtt');
       setError(null);
 
-      // Fetch combined endpoint from our server (handles caching)
-      const response = await fetch(`/api/pskreporter/${encodeURIComponent(callsign)}?minutes=${minutes}`);
-      
-      if (response.ok) {
-        const data = await response.json();
-        
-        // Process TX reports (where I'm being heard)
-        const txData = data.tx?.reports || [];
-        const processedTx = txData
-          .map(r => ({
-            ...r,
-            // Ensure we have location data
-            lat: r.lat || (r.receiverGrid ? gridToLatLon(r.receiverGrid)?.lat : null),
-            lon: r.lon || (r.receiverGrid ? gridToLatLon(r.receiverGrid)?.lon : null),
-            age: r.age || Math.floor((Date.now() - r.timestamp) / 60000)
-          }))
-          .filter(r => r.lat && r.lon)
-          .slice(0, maxSpots);
-        
-        // Process RX reports (what I'm hearing)
-        const rxData = data.rx?.reports || [];
-        const processedRx = rxData
-          .map(r => ({
-            ...r,
-            lat: r.lat || (r.senderGrid ? gridToLatLon(r.senderGrid)?.lat : null),
-            lon: r.lon || (r.senderGrid ? gridToLatLon(r.senderGrid)?.lon : null),
-            age: r.age || Math.floor((Date.now() - r.timestamp) / 60000)
-          }))
-          .filter(r => r.lat && r.lon)
-          .slice(0, maxSpots);
-        
-        setTxReports(processedTx);
-        setRxReports(processedRx);
-        setLastUpdate(new Date());
-        
-        // Check for errors in response
-        if (data.error || data.tx?.error || data.rx?.error) {
-          setError(data.error || data.tx?.error || data.rx?.error);
+      // Subscribe to spots where we are the sender (being heard by others)
+      // Topic format: pskr/filter/v2/{mode}/{band}/{senderCall}/{senderLoc}/{rxCall}/{rxLoc}/{freq}/{snr}
+      const txTopic = `pskr/filter/v2/+/+/${upperCallsign}/#`;
+      client.subscribe(txTopic, { qos: 0 }, (err) => {
+        if (err) {
+          console.error('[PSKReporter MQTT] TX subscribe error:', err);
+        } else {
+          console.log(`[PSKReporter MQTT] Subscribed TX: ${txTopic}`);
         }
-      } else {
-        throw new Error(`HTTP ${response.status}`);
-      }
-    } catch (err) {
-      console.error('PSKReporter fetch error:', err);
-      setError(err.message);
-    } finally {
+      });
+
+      // Subscribe to spots where we are the receiver (hearing others)
+      const rxTopic = `pskr/filter/v2/+/+/+/+/${upperCallsign}/#`;
+      client.subscribe(rxTopic, { qos: 0 }, (err) => {
+        if (err) {
+          console.error('[PSKReporter MQTT] RX subscribe error:', err);
+        } else {
+          console.log(`[PSKReporter MQTT] Subscribed RX: ${rxTopic}`);
+        }
+      });
+    });
+
+    client.on('message', processMessage);
+
+    client.on('error', (err) => {
+      if (!mountedRef.current) return;
+      console.error('[PSKReporter MQTT] Error:', err.message);
+      setError('Connection error');
+      setConnected(false);
       setLoading(false);
-    }
-  }, [callsign, minutes, enabled, maxSpots]);
+    });
 
+    client.on('close', () => {
+      if (!mountedRef.current) return;
+      console.log('[PSKReporter MQTT] Disconnected');
+      setConnected(false);
+    });
+
+    client.on('offline', () => {
+      if (!mountedRef.current) return;
+      console.log('[PSKReporter MQTT] Offline');
+      setConnected(false);
+      setSource('offline');
+    });
+
+    client.on('reconnect', () => {
+      if (!mountedRef.current) return;
+      console.log('[PSKReporter MQTT] Reconnecting...');
+      setSource('reconnecting');
+    });
+
+    // Cleanup on unmount or callsign change
+    return () => {
+      mountedRef.current = false;
+      if (client) {
+        console.log('[PSKReporter MQTT] Cleaning up...');
+        client.end(true);
+      }
+    };
+  }, [callsign, enabled, processMessage]);
+
+  // Periodically clean old spots and update ages
   useEffect(() => {
-    fetchData();
+    if (!enabled) return;
     
-    if (enabled && refreshInterval > 0) {
-      const interval = setInterval(fetchData, refreshInterval);
-      return () => clearInterval(interval);
-    }
-  }, [fetchData, enabled, refreshInterval]);
+    const interval = setInterval(() => {
+      // Update ages and clean old spots
+      const now = Date.now();
+      
+      setTxReports(prev => prev.map(r => ({
+        ...r,
+        age: Math.floor((now - r.timestamp) / 60000)
+      })).filter(r => r.age <= minutes));
+      
+      setRxReports(prev => prev.map(r => ({
+        ...r,
+        age: Math.floor((now - r.timestamp) / 60000)
+      })).filter(r => r.age <= minutes));
+      
+    }, 30000); // Every 30 seconds
+    
+    return () => clearInterval(interval);
+  }, [enabled, minutes]);
 
-  // Computed stats
-  const txBands = [...new Set(txReports.map(r => r.band))].filter(b => b && b !== 'Unknown');
-  const txModes = [...new Set(txReports.map(r => r.mode))].filter(Boolean);
-  
-  const stats = {
-    txCount: txReports.length,
-    rxCount: rxReports.length,
-    txBands,
-    txModes,
-    bestSnr: txReports.length > 0
-      ? txReports.reduce((max, r) => (r.snr || -99) > (max?.snr || -99) ? r : max, null)
-      : null
-  };
+  // Manual refresh - force reconnect
+  const refresh = useCallback(() => {
+    if (clientRef.current) {
+      clientRef.current.end(true);
+      clientRef.current = null;
+    }
+    setConnected(false);
+    setLoading(true);
+    setSource('reconnecting');
+    // useEffect will reconnect due to state change
+  }, []);
 
   return {
     txReports,
     txCount: txReports.length,
     rxReports,
     rxCount: rxReports.length,
-    stats,
     loading,
     error,
-    connected: false, // HTTP mode - not real-time connected
-    source: 'http',
+    connected,
+    source,
     lastUpdate,
-    refresh: fetchData
+    refresh
   };
 };
 

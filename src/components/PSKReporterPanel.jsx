@@ -1,15 +1,15 @@
 /**
  * PSKReporter Panel
  * Shows where your digital mode signals are being received
- * Styled to match DXClusterPanel
+ * Uses MQTT WebSocket for real-time data
  */
 import React, { useState } from 'react';
 import { usePSKReporter } from '../hooks/usePSKReporter.js';
 import { getBandColor } from '../utils/callsign.js';
 
 const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => {
-  const [timeWindow, setTimeWindow] = useState(15);
-  const [activeTab, setActiveTab] = useState('rx'); // Default to 'rx' (Hearing) - more useful
+  const [timeWindow] = useState(15); // Keep spots for 15 minutes
+  const [activeTab, setActiveTab] = useState('tx'); // Default to 'tx' (Being Heard)
   
   const { 
     txReports, 
@@ -18,6 +18,8 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
     rxCount, 
     loading, 
     error,
+    connected,
+    source,
     refresh 
   } = usePSKReporter(callsign, { 
     minutes: timeWindow,
@@ -25,7 +27,6 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
   });
 
   const reports = activeTab === 'tx' ? txReports : rxReports;
-  const count = activeTab === 'tx' ? txCount : rxCount;
 
   // Get band color from frequency
   const getFreqColor = (freqMHz) => {
@@ -39,6 +40,20 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
     if (minutes < 1) return 'now';
     if (minutes < 60) return `${minutes}m`;
     return `${Math.floor(minutes/60)}h`;
+  };
+
+  // Get status indicator
+  const getStatusIndicator = () => {
+    if (connected) {
+      return <span style={{ color: '#4ade80', fontSize: '10px' }}>● LIVE</span>;
+    }
+    if (source === 'connecting' || source === 'reconnecting') {
+      return <span style={{ color: '#fbbf24', fontSize: '10px' }}>◐ {source}</span>;
+    }
+    if (error) {
+      return <span style={{ color: '#ef4444', fontSize: '10px' }}>● offline</span>;
+    }
+    return null;
   };
 
   if (!callsign || callsign === 'N0CALL') {
@@ -72,30 +87,12 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
         justifyContent: 'space-between', 
         alignItems: 'center' 
       }}>
-        <span>📡 PSKReporter</span>
+        <span>📡 PSKReporter {getStatusIndicator()}</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <select 
-            value={timeWindow}
-            onChange={(e) => setTimeWindow(parseInt(e.target.value))}
-            style={{
-              background: 'rgba(100, 100, 100, 0.3)',
-              border: '1px solid #666',
-              color: '#aaa',
-              padding: '2px 4px',
-              borderRadius: '4px',
-              fontSize: '10px',
-              fontFamily: 'JetBrains Mono',
-              cursor: 'pointer'
-            }}
-          >
-            <option value={5}>5m</option>
-            <option value={15}>15m</option>
-            <option value={30}>30m</option>
-            <option value={60}>1h</option>
-          </select>
           <button
             onClick={refresh}
             disabled={loading}
+            title={connected ? 'Reconnect' : 'Connect'}
             style={{
               background: 'rgba(100, 100, 100, 0.3)',
               border: '1px solid #666',
@@ -170,17 +167,24 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
       </div>
 
       {/* Reports list - matches DX Cluster style */}
-      {error ? (
+      {error && !connected ? (
         <div style={{ textAlign: 'center', padding: '10px', color: 'var(--text-muted)', fontSize: '11px' }}>
-          ⚠️ Temporarily unavailable
+          ⚠️ Connection failed - click 🔄 to retry
         </div>
       ) : loading && reports.length === 0 ? (
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '20px' }}>
-          <div className="loading-spinner" />
+        <div style={{ textAlign: 'center', padding: '15px', color: 'var(--text-muted)', fontSize: '11px' }}>
+          <div className="loading-spinner" style={{ margin: '0 auto 8px' }} />
+          Connecting to MQTT...
+        </div>
+      ) : !connected && reports.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '10px', color: 'var(--text-muted)', fontSize: '11px' }}>
+          Waiting for connection...
         </div>
       ) : reports.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '10px', color: 'var(--text-muted)', fontSize: '11px' }}>
-          No {activeTab === 'tx' ? 'reception reports' : 'stations heard'}
+          {activeTab === 'tx' 
+            ? 'Waiting for spots... (TX to see reports)' 
+            : 'No stations heard yet'}
         </div>
       ) : (
         <div style={{ 

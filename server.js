@@ -1952,7 +1952,8 @@ app.get('/api/pskreporter/config', (req, res) => {
 // Fallback HTTP endpoint for when MQTT isn't available
 // Uses the traditional retrieve API with caching
 let pskHttpCache = {};
-const PSK_HTTP_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const PSK_HTTP_CACHE_TTL = 10 * 60 * 1000; // 10 minutes - PSKReporter rate limits aggressively
+let psk503Backoff = 0; // Timestamp when we can try again after 503
 
 app.get('/api/pskreporter/http/:callsign', async (req, res) => {
   const callsign = req.params.callsign.toUpperCase();
@@ -1964,9 +1965,24 @@ app.get('/api/pskreporter/http/:callsign', async (req, res) => {
   const cacheKey = `${direction}:${callsign}:${minutes}`;
   const now = Date.now();
   
-  // Check cache
+  // Check cache first
   if (pskHttpCache[cacheKey] && (now - pskHttpCache[cacheKey].timestamp) < PSK_HTTP_CACHE_TTL) {
     return res.json({ ...pskHttpCache[cacheKey].data, cached: true });
+  }
+  
+  // If we're in 503 backoff period, return cached data or empty result
+  if (psk503Backoff > now) {
+    console.log(`[PSKReporter HTTP] In backoff period, ${Math.round((psk503Backoff - now) / 1000)}s remaining`);
+    if (pskHttpCache[cacheKey]) {
+      return res.json({ ...pskHttpCache[cacheKey].data, cached: true, stale: true });
+    }
+    return res.json({ 
+      callsign, 
+      direction, 
+      count: 0, 
+      reports: [],
+      backoff: true
+    });
   }
   
   try {
@@ -1989,6 +2005,11 @@ app.get('/api/pskreporter/http/:callsign', async (req, res) => {
     clearTimeout(timeout);
     
     if (!response.ok) {
+      // On 503, set backoff period (15 minutes) to avoid hammering
+      if (response.status === 503) {
+        psk503Backoff = Date.now() + (15 * 60 * 1000);
+        console.log(`[PSKReporter HTTP] Got 503, backing off for 15 minutes`);
+      }
       throw new Error(`HTTP ${response.status}`);
     }
     
@@ -2039,6 +2060,9 @@ app.get('/api/pskreporter/http/:callsign', async (req, res) => {
     // Sort by timestamp (newest first)
     reports.sort((a, b) => b.timestamp - a.timestamp);
     
+    // Clear backoff on success
+    psk503Backoff = 0;
+    
     const result = {
       callsign,
       direction,
@@ -2057,18 +2081,17 @@ app.get('/api/pskreporter/http/:callsign', async (req, res) => {
   } catch (error) {
     logErrorOnce('PSKReporter HTTP', error.message);
     
-    // Return cached data if available
+    // Return cached data if available (without error flag)
     if (pskHttpCache[cacheKey]) {
       return res.json({ ...pskHttpCache[cacheKey].data, cached: true, stale: true });
     }
     
+    // Return empty result without error flag for 503s (rate limiting is expected)
     res.json({ 
       callsign, 
       direction, 
       count: 0, 
-      reports: [], 
-      error: error.message,
-      hint: 'Consider using MQTT WebSocket connection for real-time data'
+      reports: []
     });
   }
 });
