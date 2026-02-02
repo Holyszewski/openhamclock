@@ -39,16 +39,34 @@ import {
   loadConfig,
   saveConfig,
   applyTheme,
+  fetchServerConfig,
   calculateGridSquare,
   calculateSunTimes
 } from './utils';
 
 const App = () => {
-  // Configuration state
+  // Configuration state - initially use defaults, then load from server
   const [config, setConfig] = useState(loadConfig);
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [startTime] = useState(Date.now());
   const [uptime, setUptime] = useState('0d 0h 0m');
+  
+  // Load server configuration on startup
+  useEffect(() => {
+    const initConfig = async () => {
+      await fetchServerConfig();
+      const serverConfig = loadConfig();
+      setConfig(serverConfig);
+      setConfigLoaded(true);
+      
+      // Auto-show settings if config is incomplete
+      if (serverConfig.configIncomplete || serverConfig.callsign === 'N0CALL') {
+        setShowSettings(true);
+      }
+    };
+    initConfig();
+  }, []);
   
   // DX Location with localStorage persistence
   const [dxLocation, setDxLocation] = useState(() => {
