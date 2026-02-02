@@ -13,6 +13,7 @@ import {
   ContestPanel,
   SettingsPanel,
   DXFilterManager,
+  PSKFilterManager,
   SolarPanel,
   PropagationPanel,
   DXpeditionPanel,
@@ -96,6 +97,7 @@ const App = () => {
   // UI state
   const [showSettings, setShowSettings] = useState(false);
   const [showDXFilters, setShowDXFilters] = useState(false);
+  const [showPSKFilters, setShowPSKFilters] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   
   // Map layer visibility
@@ -183,6 +185,20 @@ const App = () => {
     } catch (e) {}
   }, [dxFilters]);
   
+  // PSKReporter Filters
+  const [pskFilters, setPskFilters] = useState(() => {
+    try {
+      const stored = localStorage.getItem('openhamclock_pskFilters');
+      return stored ? JSON.parse(stored) : {};
+    } catch (e) { return {}; }
+  });
+  
+  useEffect(() => {
+    try {
+      localStorage.setItem('openhamclock_pskFilters', JSON.stringify(pskFilters));
+    } catch (e) {}
+  }, [pskFilters]);
+  
   const dxCluster = useDXCluster(config.dxClusterSource || 'auto', dxFilters);
   const dxPaths = useDXPaths();
   const dxpeditions = useDXpeditions();
@@ -192,6 +208,25 @@ const App = () => {
   const satellites = useSatellites(config.location);
   const localWeather = useLocalWeather(config.location);
   const pskReporter = usePSKReporter(config.callsign, { minutes: 15, enabled: config.callsign !== 'N0CALL' });
+
+  // Filter PSKReporter spots for map display
+  const filteredPskSpots = useMemo(() => {
+    const allSpots = [...(pskReporter.txReports || []), ...(pskReporter.rxReports || [])];
+    if (!pskFilters?.bands?.length && !pskFilters?.grids?.length && !pskFilters?.modes?.length) {
+      return allSpots;
+    }
+    return allSpots.filter(spot => {
+      if (pskFilters?.bands?.length && !pskFilters.bands.includes(spot.band)) return false;
+      if (pskFilters?.modes?.length && !pskFilters.modes.includes(spot.mode)) return false;
+      if (pskFilters?.grids?.length) {
+        const grid = spot.receiverGrid || spot.senderGrid;
+        if (!grid) return false;
+        const gridPrefix = grid.substring(0, 2).toUpperCase();
+        if (!pskFilters.grids.includes(gridPrefix)) return false;
+      }
+      return true;
+    });
+  }, [pskReporter.txReports, pskReporter.rxReports, pskFilters]);
 
   // Computed values
   const deGrid = useMemo(() => calculateGridSquare(config.location.lat, config.location.lon), [config.location]);
@@ -461,7 +496,7 @@ const App = () => {
                 dxPaths={dxPaths.data}
                 dxFilters={dxFilters}
                 satellites={satellites.data}
-                pskReporterSpots={[...(pskReporter.txReports || []), ...(pskReporter.rxReports || [])]}
+                pskReporterSpots={filteredPskSpots}
                 showDXPaths={mapLayers.showDXPaths}
                 showDXLabels={mapLayers.showDXLabels}
                 onToggleDXLabels={toggleDXLabels}
@@ -599,7 +634,7 @@ const App = () => {
             dxPaths={dxPaths.data}
             dxFilters={dxFilters}
             satellites={satellites.data}
-            pskReporterSpots={[...(pskReporter.txReports || []), ...(pskReporter.rxReports || [])]}
+            pskReporterSpots={filteredPskSpots}
             showDXPaths={mapLayers.showDXPaths}
             showDXLabels={mapLayers.showDXLabels}
             onToggleDXLabels={toggleDXLabels}
@@ -648,6 +683,8 @@ const App = () => {
               callsign={config.callsign}
               showOnMap={mapLayers.showPSKReporter}
               onToggleMap={togglePSKReporter}
+              filters={pskFilters}
+              onOpenFilters={() => setShowPSKFilters(true)}
               onShowOnMap={(report) => {
                 if (report.lat && report.lon) {
                   setDxLocation({ lat: report.lat, lon: report.lon, call: report.receiver || report.sender });
@@ -691,6 +728,12 @@ const App = () => {
         onFilterChange={setDxFilters}
         isOpen={showDXFilters}
         onClose={() => setShowDXFilters(false)}
+      />
+      <PSKFilterManager
+        filters={pskFilters}
+        onFilterChange={setPskFilters}
+        isOpen={showPSKFilters}
+        onClose={() => setShowPSKFilters(false)}
       />
     </div>
   );

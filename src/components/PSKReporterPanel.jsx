@@ -3,12 +3,18 @@
  * Shows where your digital mode signals are being received
  * Uses MQTT WebSocket for real-time data
  */
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { usePSKReporter } from '../hooks/usePSKReporter.js';
 import { getBandColor } from '../utils/callsign.js';
 
-const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => {
-  const [timeWindow] = useState(15); // Keep spots for 15 minutes
+const PSKReporterPanel = ({ 
+  callsign, 
+  onShowOnMap, 
+  showOnMap, 
+  onToggleMap,
+  filters = {},
+  onOpenFilters
+}) => {
   const [activeTab, setActiveTab] = useState('tx'); // Default to 'tx' (Being Heard)
   
   const { 
@@ -22,11 +28,44 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
     source,
     refresh 
   } = usePSKReporter(callsign, { 
-    minutes: timeWindow,
+    minutes: 15,
     enabled: callsign && callsign !== 'N0CALL'
   });
 
-  const reports = activeTab === 'tx' ? txReports : rxReports;
+  // Filter reports by band, grid, and mode
+  const filterReports = (reports) => {
+    return reports.filter(r => {
+      // Band filter
+      if (filters?.bands?.length && !filters.bands.includes(r.band)) return false;
+      
+      // Grid filter (prefix match)
+      if (filters?.grids?.length) {
+        const grid = activeTab === 'tx' ? r.receiverGrid : r.senderGrid;
+        if (!grid) return false;
+        const gridPrefix = grid.substring(0, 2).toUpperCase();
+        if (!filters.grids.includes(gridPrefix)) return false;
+      }
+      
+      // Mode filter
+      if (filters?.modes?.length && !filters.modes.includes(r.mode)) return false;
+      
+      return true;
+    });
+  };
+
+  const filteredTx = useMemo(() => filterReports(txReports), [txReports, filters, activeTab]);
+  const filteredRx = useMemo(() => filterReports(rxReports), [rxReports, filters, activeTab]);
+  const filteredReports = activeTab === 'tx' ? filteredTx : filteredRx;
+
+  // Count active filters
+  const getActiveFilterCount = () => {
+    let count = 0;
+    if (filters?.bands?.length) count++;
+    if (filters?.grids?.length) count++;
+    if (filters?.modes?.length) count++;
+    return count;
+  };
+  const filterCount = getActiveFilterCount();
 
   // Get band color from frequency
   const getFreqColor = (freqMHz) => {
@@ -77,7 +116,7 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
       height: '100%',
       overflow: 'hidden'
     }}>
-      {/* Header - matches DX Cluster style */}
+      {/* Header */}
       <div style={{ 
         fontSize: '12px', 
         color: 'var(--accent-primary)', 
@@ -89,6 +128,24 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
       }}>
         <span>📡 PSKReporter {getStatusIndicator()}</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span style={{ fontSize: '9px', color: 'var(--text-muted)' }}>
+            {filteredReports.length}/{activeTab === 'tx' ? txCount : rxCount}
+          </span>
+          <button
+            onClick={onOpenFilters}
+            style={{
+              background: filterCount > 0 ? 'rgba(255, 170, 0, 0.3)' : 'rgba(100, 100, 100, 0.3)',
+              border: `1px solid ${filterCount > 0 ? '#ffaa00' : '#666'}`,
+              color: filterCount > 0 ? '#ffaa00' : '#888',
+              padding: '2px 8px',
+              borderRadius: '4px',
+              fontSize: '10px',
+              fontFamily: 'JetBrains Mono',
+              cursor: 'pointer'
+            }}
+          >
+            🔍 Filters
+          </button>
           <button
             onClick={refresh}
             disabled={loading}
@@ -126,7 +183,7 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
         </div>
       </div>
       
-      {/* Tabs - compact style */}
+      {/* Tabs */}
       <div style={{ 
         display: 'flex', 
         gap: '4px',
@@ -146,7 +203,7 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
             fontFamily: 'JetBrains Mono'
           }}
         >
-          📤 Being Heard ({txCount})
+          📤 Being Heard ({filterCount > 0 ? `${filteredTx.length}` : txCount})
         </button>
         <button
           onClick={() => setActiveTab('rx')}
@@ -162,29 +219,31 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
             fontFamily: 'JetBrains Mono'
           }}
         >
-          📥 Hearing ({rxCount})
+          📥 Hearing ({filterCount > 0 ? `${filteredRx.length}` : rxCount})
         </button>
       </div>
 
-      {/* Reports list - matches DX Cluster style */}
+      {/* Reports list */}
       {error && !connected ? (
         <div style={{ textAlign: 'center', padding: '10px', color: 'var(--text-muted)', fontSize: '11px' }}>
           ⚠️ Connection failed - click 🔄 to retry
         </div>
-      ) : loading && reports.length === 0 ? (
+      ) : loading && filteredReports.length === 0 && filterCount === 0 ? (
         <div style={{ textAlign: 'center', padding: '15px', color: 'var(--text-muted)', fontSize: '11px' }}>
           <div className="loading-spinner" style={{ margin: '0 auto 8px' }} />
           Connecting to MQTT...
         </div>
-      ) : !connected && reports.length === 0 ? (
+      ) : !connected && filteredReports.length === 0 && filterCount === 0 ? (
         <div style={{ textAlign: 'center', padding: '10px', color: 'var(--text-muted)', fontSize: '11px' }}>
           Waiting for connection...
         </div>
-      ) : reports.length === 0 ? (
+      ) : filteredReports.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '10px', color: 'var(--text-muted)', fontSize: '11px' }}>
-          {activeTab === 'tx' 
-            ? 'Waiting for spots... (TX to see reports)' 
-            : 'No stations heard yet'}
+          {filterCount > 0 
+            ? 'No spots match filters'
+            : activeTab === 'tx' 
+              ? 'Waiting for spots... (TX to see reports)' 
+              : 'No stations heard yet'}
         </div>
       ) : (
         <div style={{ 
@@ -193,7 +252,7 @@ const PSKReporterPanel = ({ callsign, onShowOnMap, showOnMap, onToggleMap }) => 
           fontSize: '12px',
           fontFamily: 'JetBrains Mono, monospace'
         }}>
-          {reports.slice(0, 20).map((report, i) => {
+          {filteredReports.slice(0, 20).map((report, i) => {
             const freqMHz = report.freqMHz || (report.freq ? (report.freq / 1000000).toFixed(3) : '?');
             const color = getFreqColor(freqMHz);
             const displayCall = activeTab === 'tx' ? report.receiver : report.sender;
