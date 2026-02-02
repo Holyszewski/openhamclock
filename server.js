@@ -563,10 +563,10 @@ app.get('/api/dxcluster/spots', async (req, res) => {
   // Helper function for DX Spider (telnet-based, works locally/Pi)
   // Multiple nodes for failover
   const DXSPIDER_NODES = [
-    { host: 'dxspider.co.uk', port: 7300 },
-    { host: 'w6kk.no-ip.org', port: 7300 },
     { host: 'dxc.nc7j.com', port: 7373 },
-    { host: 'dx.k3lr.com', port: 7300 }
+    { host: 'dxc.ai9t.com', port: 7373 },
+    { host: 'dxc.w6cua.org', port: 7300 },
+    { host: 'spider.ham-radio-deluxe.com', port: 8000 }
   ];
   
   async function fetchDXSpider() {
@@ -677,7 +677,7 @@ app.get('/api/dxcluster/spots', async (req, res) => {
       
       client.on('error', (err) => {
         // Only log unexpected errors, not connection resets (they're common)
-        if (!err.message.includes('ECONNRESET') && !err.message.includes('ETIMEDOUT')) {
+        if (!err.message.includes('ECONNRESET') && !err.message.includes('ETIMEDOUT') && !err.message.includes('ENOTFOUND')) {
           console.error(`[DX Cluster] DX Spider ${node.host} error:`, err.message);
         }
         cleanup();
@@ -754,7 +754,7 @@ app.get('/api/dxcluster/sources', (req, res) => {
     { id: 'auto', name: 'Auto (Best Available)', description: 'Tries Proxy first, then HamQTH, then direct telnet' },
     { id: 'proxy', name: 'DX Spider Proxy ⭐', description: 'Our dedicated proxy service - real-time telnet feed via HTTP' },
     { id: 'hamqth', name: 'HamQTH', description: 'HamQTH.com CSV feed (HTTP, works everywhere)' },
-    { id: 'dxspider', name: 'DX Spider Direct', description: 'Direct telnet to dxspider.co.uk:7300 (works locally/Pi only)' }
+    { id: 'dxspider', name: 'DX Spider Direct', description: 'Direct telnet to DX cluster (works locally/Pi only)' }
   ]);
 });
 

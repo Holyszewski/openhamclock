@@ -19,10 +19,10 @@ app.use(express.json());
 const CONFIG = {
   // DX Spider nodes to try (in order)
   nodes: [
-    { host: 'dxspider.co.uk', port: 7300, name: 'DX Spider UK' },
-    { host: 'w6kk.no-ip.org', port: 7300, name: 'W6KK' },
     { host: 'dxc.nc7j.com', port: 7373, name: 'NC7J' },
-    { host: 'dx.k3lr.com', port: 7300, name: 'K3LR' }
+    { host: 'dxc.ai9t.com', port: 7373, name: 'AI9T' },
+    { host: 'dxc.w6cua.org', port: 7300, name: 'W6CUA' },
+    { host: 'spider.ham-radio-deluxe.com', port: 8000, name: 'HRD' }
   ],
   callsign: process.env.CALLSIGN || 'OPENHAMCLOCK',
   spotRetentionMs: 30 * 60 * 1000, // 30 minutes
