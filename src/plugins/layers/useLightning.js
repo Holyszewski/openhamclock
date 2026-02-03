@@ -6,7 +6,7 @@ import { useState, useEffect, useRef } from 'react';
 
 export const metadata = {
   id: 'lightning',
-  name: 'Lightning Detection',
+  name: 'Lightning Detection(Testing-Simulated)',
   description: 'Real-time lightning strike detection and visualization',
   icon: '⚡',
   category: 'weather',
@@ -79,6 +79,7 @@ export function useLayer({ enabled = false, opacity = 0.9, map = null }) {
   const [statsControl, setStatsControl] = useState(null);
   const previousStrikeIds = useRef(new Set());
   const updateIntervalRef = useRef(null);
+  const isFirstLoad = useRef(true);
 
   // Fetch lightning data (simulated for now)
   useEffect(() => {
@@ -133,8 +134,8 @@ export function useLayer({ enabled = false, opacity = 0.9, map = null }) {
       
       currentStrikeIds.add(id);
       
-      // Check if this is a new strike
-      const isNew = !previousStrikeIds.current.has(id);
+      // Check if this is a new strike (but not on first load)
+      const isNew = !isFirstLoad.current && !previousStrikeIds.current.has(id);
       
       // Calculate age in minutes
       const ageMinutes = age / 60;
@@ -230,6 +231,11 @@ export function useLayer({ enabled = false, opacity = 0.9, map = null }) {
 
     // Update previous strike IDs for next comparison
     previousStrikeIds.current = currentStrikeIds;
+    
+    // After first load, allow animations for new strikes
+    if (isFirstLoad.current) {
+      isFirstLoad.current = false;
+    }
     
     setStrikeMarkers(newMarkers);
 

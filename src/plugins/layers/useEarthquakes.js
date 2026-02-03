@@ -24,6 +24,7 @@ export function useLayer({ enabled = false, opacity = 0.9, map = null }) {
   const [markersRef, setMarkersRef] = useState([]);
   const [earthquakeData, setEarthquakeData] = useState([]);
   const previousQuakeIds = useRef(new Set());
+  const isFirstLoad = useRef(true);
 
   // Fetch earthquake data
   useEffect(() => {
@@ -33,7 +34,8 @@ export function useLayer({ enabled = false, opacity = 0.9, map = null }) {
       try {
         // USGS GeoJSON feed - M2.5+ from last day
         const response = await fetch(
-          'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson'
+          //'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson'
+          'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/1.0_hour.geojson'
         );
         const data = await response.json();
         setEarthquakeData(data.features || []);
@@ -44,7 +46,8 @@ export function useLayer({ enabled = false, opacity = 0.9, map = null }) {
 
     fetchEarthquakes();
     // Refresh every 5 minutes
-    const interval = setInterval(fetchEarthquakes, 300000);
+    //const interval = setInterval(fetchEarthquakes, 300000);
+    const interval = setInterval(fetchEarthquakes, 60000);
 
     return () => clearInterval(interval);
   }, [enabled]);
@@ -82,8 +85,8 @@ export function useLayer({ enabled = false, opacity = 0.9, map = null }) {
       // Skip if invalid coordinates
       if (!lat || !lon || isNaN(lat) || isNaN(lon)) return;
 
-      // Check if this is a new earthquake
-      const isNew = !previousQuakeIds.current.has(quakeId);
+      // Check if this is a new earthquake (but not on first load)
+      const isNew = !isFirstLoad.current && !previousQuakeIds.current.has(quakeId);
 
       // Calculate marker size based on magnitude (M2.5 = 8px, M7+ = 40px)
       const size = Math.min(Math.max(mag * 4, 8), 40);
@@ -187,6 +190,11 @@ export function useLayer({ enabled = false, opacity = 0.9, map = null }) {
 
     // Update previous quake IDs for next comparison
     previousQuakeIds.current = currentQuakeIds;
+    
+    // After first load, allow animations for new quakes
+    if (isFirstLoad.current) {
+      isFirstLoad.current = false;
+    }
 
     setMarkersRef(newMarkers);
 
