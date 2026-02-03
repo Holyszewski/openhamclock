@@ -46,5 +46,12 @@
   "station.settings.useLocation": "📍 현재 내 위치 사용",
   "station.settings.useLocation.error1": "Could not get location. Please enter manually.",
   "station.settings.useLocation.error2": "브라우저가 위치 정보 기능을 지원하지 않습니다.",
-  "station.settings.welcome": "👋 OpenHamClock에 오신 것을 환영합니다!"
+  "station.settings.welcome": "👋 OpenHamClock에 오신 것을 환영합니다!",
+  "plugins.layers.aurora.name": "오로라 예보",
+  "plugins.layers.aurora.description": "NOAA OVATION 오로라 확률 예보 (30분)",
+  "plugins.layers.earthquakes.name": "실시간 지진 현황",
+  "plugins.layers.earthquakes.description": "USGS 실시간 지진 데이터 (지난 24시간 동안 일어난 규모 M2.5 이상의 지진)",
+  "plugins.layers.wxradar.name": "기상 레디어",
+  "plugins.layers.wxradar.description": "북아메리카 지역 NEXRAD 기상 레이더 오버레이",
+  "plugins.layers.wxradar.attribution": "기상 데이터 © Iowa State University Mesonet"
 }

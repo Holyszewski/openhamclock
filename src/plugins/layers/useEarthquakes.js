@@ -11,8 +11,8 @@ import { useState, useEffect } from 'react';
 
 export const metadata = {
   id: 'earthquakes',
-  name: 'Earthquakes',
-  description: 'Live USGS earthquake data (M2.5+ from last 24 hours)',
+  name: t('plugins.layers.earthquakes.name'),
+  description: t('plugins.layers.earthquakes.description'),
   icon: '🌋',
   category: 'geology',
   defaultEnabled: false,

@@ -1,3 +1,4 @@
+import { t } from 'i18next';
 import { useState, useEffect, useRef } from 'react';
 
 // NOAA OVATION Aurora Forecast - JSON grid data
@@ -7,8 +8,8 @@ import { useState, useEffect, useRef } from 'react';
 
 export const metadata = {
   id: 'aurora',
-  name: 'Aurora Forecast',
-  description: 'NOAA OVATION aurora probability forecast (30-min)',
+  name: t('plugins.layers.aurora.name'),
+  description: t('plugins.layers.aurora.description'),
   icon: '🌌',
   category: 'space-weather',
   defaultEnabled: false,

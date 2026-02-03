@@ -46,5 +46,12 @@
   "station.settings.useLocation": "📍 Usar Minha Localização Atual",
   "station.settings.useLocation.error1": "Não foi possível obter a localização. Por favor, insira manualmente.",
   "station.settings.useLocation.error2": "Geolocalização não é suportada pelo seu navegador.",
-  "station.settings.welcome": "👋 Bem-vindo ao OpenHamClock!"
+  "station.settings.welcome": "👋 Bem-vindo ao OpenHamClock!",
+  "plugins.layers.aurora.name": "Previsão de aurora",
+  "plugins.layers.aurora.description": "Previsão de probabilidade de aurora NOAA OVATION (30 min)",
+  "plugins.layers.earthquakes.name": "Terremotos",
+  "plugins.layers.earthquakes.description": "Dados sísmicos do USGS ao vivo (M2,5+ das últimas 24 horas)",
+  "plugins.layers.wxradar.name": "Radar meteorológico",
+  "plugins.layers.wxradar.description": "Sobreposição do radar meteorológico NEXRAD para a América do Norte",
+  "plugins.layers.wxradar.attribution": "Dados meteorológicos © Iowa State University Mesonet"
 }
