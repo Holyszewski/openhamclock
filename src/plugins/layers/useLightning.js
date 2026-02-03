@@ -159,10 +159,23 @@ export function useLayer({ enabled = false, opacity = 0.9, map = null }) {
       // Size based on intensity (12-32px)
       const size = Math.min(Math.max(intensity / 8, 12), 32);
       
-      // Create lightning bolt icon marker
+      // Create lightning bolt icon marker with high visibility
       const icon = L.divIcon({
         className: 'lightning-strike-icon',
-        html: `<div style="color: ${color}; font-size: ${size}px; text-shadow: 0 0 3px rgba(255,215,0,0.5); transition: all 0.3s;">⚡</div>`,
+        html: `<div style="
+          background-color: ${color}; 
+          color: white; 
+          width: ${size}px; 
+          height: ${size}px; 
+          border-radius: 50%; 
+          display: flex; 
+          align-items: center; 
+          justify-content: center;
+          font-size: ${size * 0.7}px;
+          font-weight: bold;
+          border: 2px solid white;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+        ">⚡</div>`,
         iconSize: [size, size],
         iconAnchor: [size/2, size/2]
       });
