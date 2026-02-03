@@ -1,3 +1,4 @@
+import { t } from 'i18next';
 import { useState, useEffect } from 'react';
 
 export const metadata = {

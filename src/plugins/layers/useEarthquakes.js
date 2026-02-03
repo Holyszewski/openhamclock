@@ -1,3 +1,4 @@
+import { t } from 'i18next';
 import { useState, useEffect } from 'react';
 
 //Scaled markers - Bigger circles for stronger quakes
