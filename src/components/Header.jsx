@@ -12,6 +12,7 @@ export const Header = ({
   localDate,
   localWeather,
   spaceWeather,
+  solarIndices,
   use12Hour,
   onTimeFormatToggle,
   onSettingsClick,
@@ -113,17 +114,17 @@ export const Header = ({
         })()}
         <div>
           <span style={{ color: 'var(--text-muted)' }}>SFI </span>
-          <span style={{ color: 'var(--accent-amber)', fontWeight: '700' }}>{spaceWeather?.data?.solarFlux || '--'}</span>
+          <span style={{ color: 'var(--accent-amber)', fontWeight: '700' }}>{solarIndices?.data?.sfi?.current || spaceWeather?.data?.solarFlux || '--'}</span>
         </div>
         <div>
           <span style={{ color: 'var(--text-muted)' }}>K </span>
-          <span style={{ color: parseInt(spaceWeather?.data?.kIndex) >= 4 ? 'var(--accent-red)' : 'var(--accent-green)', fontWeight: '700' }}>
-            {spaceWeather?.data?.kIndex ?? '--'}
+          <span style={{ color: parseInt(solarIndices?.data?.kp?.current ?? spaceWeather?.data?.kIndex) >= 4 ? 'var(--accent-red)' : 'var(--accent-green)', fontWeight: '700' }}>
+            {solarIndices?.data?.kp?.current ?? spaceWeather?.data?.kIndex ?? '--'}
           </span>
         </div>
         <div>
           <span style={{ color: 'var(--text-muted)' }}>SSN </span>
-          <span style={{ color: 'var(--accent-cyan)', fontWeight: '700' }}>{spaceWeather?.data?.sunspotNumber || '--'}</span>
+          <span style={{ color: 'var(--accent-cyan)', fontWeight: '700' }}>{solarIndices?.data?.ssn?.current || spaceWeather?.data?.sunspotNumber || '--'}</span>
         </div>
       </div>
 
