@@ -24,7 +24,7 @@ export const LANGUAGES = [
   { code: 'ja', name: '日本語', flag: '🇯🇵' },
   { code: 'ko', name: '한국어', flag: '🇰🇷' },
   { code: 'it', name: 'Italiano', flag: '🇮🇹' },
-  { code: 'sl', name: 'Slovenščina', flag: '🇸🇮' }
+  { code: 'sl', name: 'Slovenščina', flag: '🇸🇮' },
   { code: 'cs', name: 'Čeština', flag: '🇨🇿' }
 ];
 
