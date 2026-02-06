@@ -7,6 +7,7 @@ export { useSpaceWeather } from './useSpaceWeather.js';
 export { useBandConditions } from './useBandConditions.js';
 export { useDXCluster } from './useDXCluster.js';
 export { useDXPaths } from './useDXPaths.js';
+export { useDXClusterData } from './useDXClusterData.js';
 export { usePOTASpots } from './usePOTASpots.js';
 export { useContests } from './useContests.js';
 export { useWeather } from './useWeather.js';

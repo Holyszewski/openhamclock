@@ -16,10 +16,12 @@ import {
   PropagationPanel,
   DXpeditionPanel,
   PSKReporterPanel,
-  WeatherPanel
+  WeatherPanel,
+  AnalogClockPanel
 } from './components';
 
 import { loadLayout, saveLayout, DEFAULT_LAYOUT } from './store/layoutStore.js';
+import { DockableLayoutProvider } from './contexts';
 import './styles/flexlayout-openhamclock.css';
 
 // Icons
@@ -55,8 +57,7 @@ export const DockableApp = ({
   propagation,
 
   // Spots & data
-  dxCluster,
-  dxPaths,
+  dxClusterData,
   potaSpots,
   mySpots,
   dxpeditions,
@@ -122,6 +123,7 @@ export const DockableApp = ({
     'world-map': { name: 'World Map', icon: '🗺️' },
     'de-location': { name: 'DE Location', icon: '📍' },
     'dx-location': { name: 'DX Target', icon: '🎯' },
+    'analog-clock': { name: 'Analog Clock', icon: '🕐' },
     'solar': { name: 'Solar', icon: '☀️' },
     'propagation': { name: 'Propagation', icon: '📡' },
     'dx-cluster': { name: 'DX Cluster', icon: '📻' },
@@ -142,7 +144,7 @@ export const DockableApp = ({
   }, [model, targetTabSetId, panelDefs]);
 
   // Render DE Location panel content
-  const renderDELocation = () => (
+  const renderDELocation = (nodeId) => (
     <div style={{ padding: '14px', height: '100%', overflowY: 'auto' }}>
       <div style={{ fontSize: '14px', color: 'var(--accent-cyan)', fontWeight: '700', marginBottom: '10px' }}>📍 DE - YOUR LOCATION</div>
       <div style={{ fontFamily: 'JetBrains Mono', fontSize: '14px' }}>
@@ -159,12 +161,13 @@ export const DockableApp = ({
         location={config.location}
         tempUnit={tempUnit}
         onTempUnitChange={(unit) => { setTempUnit(unit); try { localStorage.setItem('openhamclock_tempUnit', unit); } catch {} }}
+        nodeId={nodeId}
       />
     </div>
   );
 
   // Render DX Location panel
-  const renderDXLocation = () => (
+  const renderDXLocation = (nodeId) => (
     <div style={{ padding: '14px', height: '100%' }}>
       <div style={{ fontSize: '14px', color: 'var(--accent-green)', fontWeight: '700', marginBottom: '10px' }}>🎯 DX - TARGET</div>
       <div style={{ fontFamily: 'JetBrains Mono', fontSize: '14px' }}>
@@ -182,6 +185,7 @@ export const DockableApp = ({
           location={dxLocation}
           tempUnit={tempUnit}
           onTempUnitChange={(unit) => { setTempUnit(unit); try { localStorage.setItem('openhamclock_tempUnit', unit); } catch {} }}
+          nodeId={nodeId}
         />
       )}
     </div>
@@ -196,7 +200,7 @@ export const DockableApp = ({
         onDXChange={handleDXChange}
         potaSpots={potaSpots.data}
         mySpots={mySpots.data}
-        dxPaths={dxPaths.data}
+        dxPaths={dxClusterData.paths}
         dxFilters={dxFilters}
         satellites={satellites.data}
         pskReporterSpots={filteredPskSpots}
@@ -219,16 +223,20 @@ export const DockableApp = ({
   // Factory for rendering panel content
   const factory = useCallback((node) => {
     const component = node.getComponent();
+    const nodeId = node.getId();
 
     switch (component) {
       case 'world-map':
         return renderWorldMap();
 
       case 'de-location':
-        return renderDELocation();
+        return renderDELocation(nodeId);
 
       case 'dx-location':
-        return renderDXLocation();
+        return renderDXLocation(nodeId);
+
+      case 'analog-clock':
+        return <AnalogClockPanel currentTime={currentTime} sunTimes={deSunTimes} />;
 
       case 'solar':
         return <SolarPanel solarIndices={solarIndices} />;
@@ -239,9 +247,9 @@ export const DockableApp = ({
       case 'dx-cluster':
         return (
           <DXClusterPanel
-            data={dxCluster.data}
-            loading={dxCluster.loading}
-            totalSpots={dxCluster.totalSpots}
+            data={dxClusterData.spots}
+            loading={dxClusterData.loading}
+            totalSpots={dxClusterData.totalSpots}
             filters={dxFilters}
             onFilterChange={setDxFilters}
             onOpenFilters={() => setShowDXFilters(true)}
@@ -296,8 +304,8 @@ export const DockableApp = ({
     }
   }, [
     config, deGrid, dxGrid, dxLocation, deSunTimes, dxSunTimes, showDxWeather, tempUnit, solarIndices,
-    propagation, bandConditions, dxCluster, dxFilters, hoveredSpot, mapLayers, potaSpots,
-    mySpots, dxPaths, satellites, filteredPskSpots, wsjtxMapSpots, dxpeditions, contests,
+    propagation, bandConditions, dxClusterData, dxFilters, hoveredSpot, mapLayers, potaSpots,
+    mySpots, satellites, filteredPskSpots, wsjtxMapSpots, dxpeditions, contests,
     pskFilters, wsjtx, handleDXChange, setDxFilters, setShowDXFilters, setShowPSKFilters,
     setHoveredSpot, toggleDXPaths, toggleDXLabels, togglePOTA, toggleSatellites, togglePSKReporter, toggleWSJTX
   ]);
@@ -349,13 +357,15 @@ export const DockableApp = ({
 
       {/* Dockable Layout */}
       <div style={{ flex: 1, position: 'relative', padding: '8px', minHeight: 0 }}>
-        <Layout
-          ref={layoutRef}
-          model={model}
-          factory={factory}
-          onModelChange={handleModelChange}
-          onRenderTabSet={onRenderTabSet}
-        />
+        <DockableLayoutProvider model={model}>
+          <Layout
+            ref={layoutRef}
+            model={model}
+            factory={factory}
+            onModelChange={handleModelChange}
+            onRenderTabSet={onRenderTabSet}
+          />
+        </DockableLayoutProvider>
       </div>
 
       {/* Panel picker modal */}

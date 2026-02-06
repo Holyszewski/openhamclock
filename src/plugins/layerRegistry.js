@@ -1,7 +1,6 @@
 /**
  * Layer Plugin Registry
  */
-
 import * as WXRadarPlugin from './layers/useWXRadar.js';
 import * as EarthquakesPlugin from './layers/useEarthquakes.js';
 import * as AuroraPlugin from './layers/useAurora.js';
@@ -9,6 +8,7 @@ import * as WSPRPlugin from './layers/useWSPR.js';
 import * as GrayLinePlugin from './layers/useGrayLine.js';
 import * as LightningPlugin from './layers/useLightning.js';
 import * as RBNPlugin from './layers/useRBN.js';
+import * as ContestQsosPlugin from './layers/useContestQsos.js';
 
 const layerPlugins = [
   WXRadarPlugin,
@@ -18,6 +18,7 @@ const layerPlugins = [
   GrayLinePlugin,
   LightningPlugin,
   RBNPlugin,
+  ContestQsosPlugin,
 ];
 
 export function getAllLayers() {

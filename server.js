@@ -24,6 +24,7 @@ const fetch = require('node-fetch');
 const net = require('net');
 const dgram = require('dgram');
 const fs = require('fs');
+const { execFile, spawn } = require('child_process');
 
 // Read version from package.json as single source of truth
 const APP_VERSION = (() => {
@@ -144,6 +145,7 @@ const CONFIG = {
   showPota: process.env.SHOW_POTA !== 'false' && jsonConfig.features?.showPOTA !== false,
   showDxPaths: process.env.SHOW_DX_PATHS !== 'false' && jsonConfig.features?.showDXPaths !== false,
   showDxWeather: process.env.SHOW_DX_WEATHER !== 'false' && jsonConfig.features?.showDXWeather !== false,
+  classicAnalogClock: process.env.CLASSIC_ANALOG_CLOCK === 'true' || jsonConfig.features?.classicAnalogClock === true,
   showContests: jsonConfig.features?.showContests !== false,
   showDXpeditions: jsonConfig.features?.showDXpeditions !== false,
   
@@ -265,64 +267,227 @@ function logErrorOnce(category, message) {
 }
 
 // ============================================
-// VISITOR TRACKING
+// VISITOR TRACKING (PERSISTENT)
 // ============================================
-// Lightweight in-memory visitor counter — tracks unique IPs per day
-// No cookies, no external analytics, no persistent storage
-// Resets on server restart; logs daily summary
+// Persistent visitor tracking that survives server restarts and deployments
+// Uses file-based storage - configure STATS_FILE env var for Railway volumes
+// Default: ./data/stats.json (local) or /data/stats.json (Railway volume)
 
-const visitorStats = {
-  today: new Date().toISOString().slice(0, 10),  // YYYY-MM-DD
-  uniqueIPs: new Set(),
-  totalRequests: 0,
-  allTimeVisitors: 0,    // Cumulative unique visitors since server start
-  allTimeRequests: 0,    // Cumulative requests since server start
-  serverStarted: new Date().toISOString(),
-  history: []  // Last 30 days of { date, uniqueVisitors, totalRequests }
-};
+// Determine best location for stats file with write permission check
+function getStatsFilePath() {
+  // If explicitly set via env var, use that
+  if (process.env.STATS_FILE) {
+    console.log(`[Stats] Using STATS_FILE env: ${process.env.STATS_FILE}`);
+    return process.env.STATS_FILE;
+  }
+  
+  // List of paths to try in order of preference
+  const pathsToTry = [
+    '/data/stats.json',                           // Railway volume
+    path.join(__dirname, 'data', 'stats.json'),   // Local ./data subdirectory
+    '/tmp/openhamclock-stats.json'                // Temp (won't survive restarts but better than nothing)
+  ];
+  
+  for (const statsPath of pathsToTry) {
+    try {
+      const dir = path.dirname(statsPath);
+      
+      // Create directory if it doesn't exist
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      
+      // Test write permission
+      const testFile = path.join(dir, '.write-test-' + Date.now());
+      fs.writeFileSync(testFile, 'test');
+      fs.unlinkSync(testFile);
+      
+      console.log(`[Stats] ✓ Using: ${statsPath}`);
+      return statsPath;
+    } catch (err) {
+      console.log(`[Stats] ✗ ${statsPath}: ${err.code || err.message}`);
+    }
+  }
+  
+  // No writable path found
+  console.log('[Stats] ⚠ No writable storage - stats will be memory-only');
+  return null;
+}
+
+const STATS_FILE = getStatsFilePath();
+const STATS_SAVE_INTERVAL = 60000; // Save every 60 seconds
+
+// Load persistent stats from disk
+function loadVisitorStats() {
+  const defaults = {
+    today: new Date().toISOString().slice(0, 10),
+    uniqueIPsToday: [],
+    totalRequestsToday: 0,
+    allTimeVisitors: 0,
+    allTimeRequests: 0,
+    allTimeUniqueIPs: [],
+    serverFirstStarted: new Date().toISOString(),
+    lastDeployment: new Date().toISOString(),
+    deploymentCount: 1,
+    history: [],
+    lastSaved: null
+  };
+  
+  // No stats file configured - memory only mode
+  if (!STATS_FILE) {
+    console.log('[Stats] Running in memory-only mode');
+    return defaults;
+  }
+  
+  try {
+    if (fs.existsSync(STATS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+      console.log(`[Stats] Loaded from ${STATS_FILE}`);
+      console.log(`[Stats]   📊 All-time: ${data.allTimeVisitors || 0} unique visitors, ${data.allTimeRequests || 0} requests`);
+      console.log(`[Stats]   📅 History: ${(data.history || []).length} days tracked`);
+      console.log(`[Stats]   🚀 Deployment #${(data.deploymentCount || 0) + 1} (first: ${data.serverFirstStarted || 'unknown'})`);
+      
+      return {
+        today: new Date().toISOString().slice(0, 10),
+        uniqueIPsToday: data.today === new Date().toISOString().slice(0, 10) ? (data.uniqueIPsToday || []) : [],
+        totalRequestsToday: data.today === new Date().toISOString().slice(0, 10) ? (data.totalRequestsToday || 0) : 0,
+        allTimeVisitors: data.allTimeVisitors || 0,
+        allTimeRequests: data.allTimeRequests || 0,
+        allTimeUniqueIPs: data.allTimeUniqueIPs || [],
+        serverFirstStarted: data.serverFirstStarted || defaults.serverFirstStarted,
+        lastDeployment: new Date().toISOString(),
+        deploymentCount: (data.deploymentCount || 0) + 1,
+        history: data.history || [],
+        lastSaved: data.lastSaved
+      };
+    }
+  } catch (err) {
+    console.error('[Stats] Failed to load:', err.message);
+  }
+  
+  console.log('[Stats] Starting fresh (no existing stats file)');
+  return defaults;
+}
+
+// Save stats to disk
+let saveErrorCount = 0;
+function saveVisitorStats() {
+  // No stats file configured - memory only mode
+  if (!STATS_FILE) {
+    return;
+  }
+  
+  try {
+    const dir = path.dirname(STATS_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    
+    const data = {
+      ...visitorStats,
+      lastSaved: new Date().toISOString()
+    };
+    
+    fs.writeFileSync(STATS_FILE, JSON.stringify(data, null, 2));
+    visitorStats.lastSaved = data.lastSaved; // Update in-memory too
+    saveErrorCount = 0; // Reset on success
+    // Only log occasionally to avoid spam
+    if (Math.random() < 0.1) {
+      console.log(`[Stats] Saved - ${visitorStats.allTimeVisitors} all-time visitors, ${visitorStats.uniqueIPsToday.length} today`);
+    }
+  } catch (err) {
+    saveErrorCount++;
+    // Only log first error and then every 10th to avoid spam
+    if (saveErrorCount === 1 || saveErrorCount % 10 === 0) {
+      console.error(`[Stats] Failed to save (attempt #${saveErrorCount}):`, err.message);
+      if (saveErrorCount === 1) {
+        console.error('[Stats] Stats will be kept in memory but won\'t persist across restarts');
+      }
+    }
+  }
+}
+
+// Initialize stats
+const visitorStats = loadVisitorStats();
+
+// Convert today's IPs to a Set for fast lookup
+const todayIPSet = new Set(visitorStats.uniqueIPsToday);
+const allTimeIPSet = new Set(visitorStats.allTimeUniqueIPs);
+
+// Save immediately on startup to confirm persistence is working
+if (STATS_FILE) {
+  saveVisitorStats();
+  console.log('[Stats] Initial save complete - persistence confirmed');
+}
+
+// Periodic save
+setInterval(saveVisitorStats, STATS_SAVE_INTERVAL);
+
+// Save on shutdown
+function gracefulShutdown(signal) {
+  console.log(`[Stats] Received ${signal}, saving before shutdown...`);
+  saveVisitorStats();
+  process.exit(0);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 function rolloverVisitorStats() {
   const now = new Date().toISOString().slice(0, 10);
   if (now !== visitorStats.today) {
     // Save yesterday's stats to history
-    visitorStats.history.push({
-      date: visitorStats.today,
-      uniqueVisitors: visitorStats.uniqueIPs.size,
-      totalRequests: visitorStats.totalRequests
-    });
-    // Keep only last 30 days
-    if (visitorStats.history.length > 30) {
-      visitorStats.history = visitorStats.history.slice(-30);
+    if (visitorStats.uniqueIPsToday.length > 0 || visitorStats.totalRequestsToday > 0) {
+      visitorStats.history.push({
+        date: visitorStats.today,
+        uniqueVisitors: visitorStats.uniqueIPsToday.length,
+        totalRequests: visitorStats.totalRequestsToday
+      });
+    }
+    // Keep only last 90 days
+    if (visitorStats.history.length > 90) {
+      visitorStats.history = visitorStats.history.slice(-90);
     }
     const avg = visitorStats.history.length > 0
       ? Math.round(visitorStats.history.reduce((sum, d) => sum + d.uniqueVisitors, 0) / visitorStats.history.length)
       : 0;
-    console.log(`[Visitors] Daily summary for ${visitorStats.today}: ${visitorStats.uniqueIPs.size} unique visitors, ${visitorStats.totalRequests} requests | All-time: ${visitorStats.allTimeVisitors} visitors, ${visitorStats.allTimeRequests} requests | ${visitorStats.history.length}-day avg: ${avg}/day`);
-    // Reset daily counters for new day
+    console.log(`[Stats] Daily rollover for ${visitorStats.today}: ${visitorStats.uniqueIPsToday.length} unique, ${visitorStats.totalRequestsToday} requests | All-time: ${visitorStats.allTimeVisitors} visitors | ${visitorStats.history.length}-day avg: ${avg}/day`);
+    
+    // Reset daily counters
     visitorStats.today = now;
-    visitorStats.uniqueIPs = new Set();
-    visitorStats.totalRequests = 0;
+    visitorStats.uniqueIPsToday = [];
+    visitorStats.totalRequestsToday = 0;
+    todayIPSet.clear();
+    
+    // Save after rollover
+    saveVisitorStats();
   }
 }
 
-// Visitor tracking middleware — only counts page loads and API config fetches
-// (not every API poll, which would inflate the count)
+// Visitor tracking middleware
 app.use((req, res, next) => {
   rolloverVisitorStats();
   
   // Only count meaningful "visits" — initial page load or config fetch
-  // This avoids counting every 5-second DX cluster poll as a "visit"
   const countableRoutes = ['/', '/index.html', '/api/config'];
   if (countableRoutes.includes(req.path)) {
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || req.connection?.remoteAddress || 'unknown';
-    const isNew = !visitorStats.uniqueIPs.has(ip);
-    visitorStats.uniqueIPs.add(ip);
-    visitorStats.totalRequests++;
+    
+    // Track today's visitors
+    const isNewToday = !todayIPSet.has(ip);
+    if (isNewToday) {
+      todayIPSet.add(ip);
+      visitorStats.uniqueIPsToday.push(ip);
+    }
+    visitorStats.totalRequestsToday++;
     visitorStats.allTimeRequests++;
     
-    if (isNew) {
+    // Track all-time unique visitors
+    const isNewAllTime = !allTimeIPSet.has(ip);
+    if (isNewAllTime) {
+      allTimeIPSet.add(ip);
+      visitorStats.allTimeUniqueIPs.push(ip);
       visitorStats.allTimeVisitors++;
-      logInfo(`[Visitors] New visitor today (#${visitorStats.uniqueIPs.size}, #${visitorStats.allTimeVisitors} all-time) from ${ip.replace(/\d+$/, 'x')}`);
+      logInfo(`[Stats] New visitor (#${visitorStats.uniqueIPsToday.length} today, #${visitorStats.allTimeVisitors} all-time) from ${ip.replace(/\d+$/, 'x')}`);
     }
   }
   
@@ -332,13 +497,138 @@ app.use((req, res, next) => {
 // Log visitor count every hour
 setInterval(() => {
   rolloverVisitorStats();
-  if (visitorStats.uniqueIPs.size > 0 || visitorStats.allTimeVisitors > 0) {
+  if (visitorStats.uniqueIPsToday.length > 0 || visitorStats.allTimeVisitors > 0) {
     const avg = visitorStats.history.length > 0
       ? Math.round(visitorStats.history.reduce((sum, d) => sum + d.uniqueVisitors, 0) / visitorStats.history.length)
-      : visitorStats.uniqueIPs.size;
-    console.log(`[Visitors] Today so far: ${visitorStats.uniqueIPs.size} unique, ${visitorStats.totalRequests} requests | All-time: ${visitorStats.allTimeVisitors} visitors | Avg: ${avg}/day`);
+      : visitorStats.uniqueIPsToday.length;
+    console.log(`[Stats] Hourly: ${visitorStats.uniqueIPsToday.length} unique today, ${visitorStats.totalRequestsToday} requests | All-time: ${visitorStats.allTimeVisitors} visitors | Avg: ${avg}/day`);
   }
 }, 60 * 60 * 1000);
+
+// ============================================
+// AUTO UPDATE (GIT)
+// ============================================
+const AUTO_UPDATE_ENABLED = process.env.AUTO_UPDATE_ENABLED === 'true';
+const AUTO_UPDATE_INTERVAL_MINUTES = parseInt(process.env.AUTO_UPDATE_INTERVAL_MINUTES || '60');
+const AUTO_UPDATE_ON_START = process.env.AUTO_UPDATE_ON_START === 'true';
+const AUTO_UPDATE_EXIT_AFTER = process.env.AUTO_UPDATE_EXIT_AFTER !== 'false';
+
+const autoUpdateState = {
+  inProgress: false,
+  lastCheck: 0,
+  lastResult: ''
+};
+
+function execFilePromise(cmd, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, options, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        return reject(err);
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function hasGitUpdates() {
+  await execFilePromise('git', ['fetch', 'origin'], { cwd: __dirname });
+  const local = (await execFilePromise('git', ['rev-parse', 'HEAD'], { cwd: __dirname })).stdout.trim();
+  let remote = '';
+  try {
+    remote = (await execFilePromise('git', ['rev-parse', 'origin/main'], { cwd: __dirname })).stdout.trim();
+  } catch {
+    remote = (await execFilePromise('git', ['rev-parse', 'origin/master'], { cwd: __dirname })).stdout.trim();
+  }
+  return { updateAvailable: local !== remote, local, remote };
+}
+
+async function hasDirtyWorkingTree() {
+  const status = await execFilePromise('git', ['status', '--porcelain'], { cwd: __dirname });
+  return status.stdout.trim().length > 0;
+}
+
+function runUpdateScript() {
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.join(__dirname, 'scripts', 'update.sh');
+    const child = spawn('bash', [scriptPath, '--auto'], {
+      cwd: __dirname,
+      stdio: 'inherit'
+    });
+    child.on('exit', (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(`update.sh exited with code ${code}`));
+    });
+  });
+}
+
+async function autoUpdateTick(trigger = 'interval', force = false) {
+  if ((!AUTO_UPDATE_ENABLED && !force) || autoUpdateState.inProgress) return;
+  autoUpdateState.inProgress = true;
+  autoUpdateState.lastCheck = Date.now();
+
+  try {
+    if (!fs.existsSync(path.join(__dirname, '.git'))) {
+      autoUpdateState.lastResult = 'not-git';
+      logWarn('[Auto Update] Skipped - not a git repository');
+      return;
+    }
+
+    try {
+      await execFilePromise('git', ['--version']);
+    } catch {
+      autoUpdateState.lastResult = 'no-git';
+      logWarn('[Auto Update] Skipped - git not installed');
+      return;
+    }
+
+    if (await hasDirtyWorkingTree()) {
+      autoUpdateState.lastResult = 'dirty';
+      logWarn('[Auto Update] Skipped - local changes detected');
+      return;
+    }
+
+    const { updateAvailable } = await hasGitUpdates();
+    if (!updateAvailable) {
+      autoUpdateState.lastResult = 'up-to-date';
+      logInfo(`[Auto Update] Up to date (${trigger})`);
+      return;
+    }
+
+    autoUpdateState.lastResult = 'updating';
+    logInfo('[Auto Update] Updates available - running update script');
+    await runUpdateScript();
+    autoUpdateState.lastResult = 'updated';
+    logInfo('[Auto Update] Update complete');
+
+    if (AUTO_UPDATE_EXIT_AFTER) {
+      logInfo('[Auto Update] Exiting to allow restart');
+      process.exit(0);
+    }
+  } catch (err) {
+    autoUpdateState.lastResult = 'error';
+    logErrorOnce('Auto Update', err.message);
+  } finally {
+    autoUpdateState.inProgress = false;
+  }
+}
+
+function startAutoUpdateScheduler() {
+  if (!AUTO_UPDATE_ENABLED) return;
+  const intervalMinutes = Number.isFinite(AUTO_UPDATE_INTERVAL_MINUTES) && AUTO_UPDATE_INTERVAL_MINUTES > 0
+    ? AUTO_UPDATE_INTERVAL_MINUTES
+    : 60;
+  const intervalMs = Math.max(5, intervalMinutes) * 60 * 1000;
+
+  logInfo(`[Auto Update] Enabled - every ${intervalMinutes} minutes`);
+
+  if (AUTO_UPDATE_ON_START) {
+    setTimeout(() => autoUpdateTick('startup'), 30000);
+  }
+
+  setInterval(() => autoUpdateTick('interval'), intervalMs);
+}
 
 // Serve static files
 // dist/ contains the built React app (from npm run build)
@@ -815,7 +1105,7 @@ app.get('/api/dxnews', async (req, res) => {
     }
 
     const response = await fetch('https://dxnews.com/', {
-      headers: { 'User-Agent': 'OpenHamClock/1.0 (amateur radio dashboard)' }
+      headers: { 'User-Agent': 'OpenHamClock/3.13.1 (amateur radio dashboard)' }
     });
     const html = await response.text();
 
@@ -993,7 +1283,7 @@ app.get('/api/dxcluster/spots', async (req, res) => {
     
     try {
       const response = await fetch('https://www.hamqth.com/dxc_csv.php?limit=25', {
-        headers: { 'User-Agent': 'OpenHamClock/3.5' },
+        headers: { 'User-Agent': 'OpenHamClock/3.13.1' },
         signal: controller.signal
       });
       clearTimeout(timeout);
@@ -1052,7 +1342,7 @@ app.get('/api/dxcluster/spots', async (req, res) => {
     
     try {
       const response = await fetch(`${DXSPIDER_PROXY_URL}/api/dxcluster/spots?limit=50`, {
-        headers: { 'User-Agent': 'OpenHamClock/3.5' },
+        headers: { 'User-Agent': 'OpenHamClock/3.13.1' },
         signal: controller.signal
       });
       clearTimeout(timeout);
@@ -1302,7 +1592,7 @@ app.get('/api/dxcluster/paths', async (req, res) => {
     
     try {
       const proxyResponse = await fetch(`${DXSPIDER_PROXY_URL}/api/spots?limit=100`, {
-        headers: { 'User-Agent': 'OpenHamClock/3.7' },
+        headers: { 'User-Agent': 'OpenHamClock/3.13.1' },
         signal: controller.signal
       });
       
@@ -1331,7 +1621,7 @@ app.get('/api/dxcluster/paths', async (req, res) => {
     if (newSpots.length === 0) {
       try {
         const response = await fetch('https://www.hamqth.com/dxc_csv.php?limit=50', {
-          headers: { 'User-Agent': 'OpenHamClock/3.7' },
+          headers: { 'User-Agent': 'OpenHamClock/3.13.1' },
           signal: controller.signal
         });
         
@@ -1697,167 +1987,543 @@ function estimateLocationFromPrefix(callsign) {
   
   // Comprehensive prefix to grid mapping
   // Uses typical/central grid for each prefix area
+  // Comprehensive prefix to grid mapping
+  // Based on ITU allocations and DXCC entity list (~340 entities)
+  // Grid squares are approximate center of each entity
   const prefixGrids = {
+    // ============================================
     // USA - by call district
-    'W1': 'FN41', 'K1': 'FN41', 'N1': 'FN41', 'AA1': 'FN41', // New England
-    'W2': 'FN20', 'K2': 'FN20', 'N2': 'FN20', 'AA2': 'FN20', // NY/NJ
-    'W3': 'FM19', 'K3': 'FM19', 'N3': 'FM19', 'AA3': 'FM19', // PA/MD/DE
-    'W4': 'EM73', 'K4': 'EM73', 'N4': 'EM73', 'AA4': 'EM73', // SE USA
-    'W5': 'EM12', 'K5': 'EM12', 'N5': 'EM12', 'AA5': 'EM12', // TX/OK/LA/AR/MS
-    'W6': 'CM97', 'K6': 'CM97', 'N6': 'CM97', 'AA6': 'CM97', // California
-    'W7': 'DN31', 'K7': 'DN31', 'N7': 'DN31', 'AA7': 'DN31', // Pacific NW/Mountain
-    'W8': 'EN81', 'K8': 'EN81', 'N8': 'EN81', 'AA8': 'EN81', // MI/OH/WV
-    'W9': 'EN52', 'K9': 'EN52', 'N9': 'EN52', 'AA9': 'EN52', // IL/IN/WI
-    'W0': 'EN31', 'K0': 'EN31', 'N0': 'EN31', 'AA0': 'EN31', // Central USA
-    // Generic USA (no district) - AA through AL are all US prefixes
-    'W': 'EM79', 'K': 'EM79', 'N': 'EM79', 
-    'AA': 'EM79', 'AB': 'EM79', 'AC': 'EM79', 'AD': 'EM79', 'AE': 'EM79', 'AF': 'EM79',
-    'AG': 'EM79', 'AH': 'EM79', 'AI': 'EM79', 'AJ': 'EM79', 'AK': 'EM79', 'AL': 'EM79',
-    // US A-prefixes by call district
-    'AE0': 'EN31', 'AE1': 'FN41', 'AE2': 'FN20', 'AE3': 'FM19', 'AE4': 'EM73', 
-    'AE5': 'EM12', 'AE6': 'CM97', 'AE7': 'DN31', 'AE8': 'EN81', 'AE9': 'EN52',
-    'AC0': 'EN31', 'AC1': 'FN41', 'AC2': 'FN20', 'AC3': 'FM19', 'AC4': 'EM73',
-    'AC5': 'EM12', 'AC6': 'CM97', 'AC7': 'DN31', 'AC8': 'EN81', 'AC9': 'EN52',
-    'AD0': 'EN31', 'AD1': 'FN41', 'AD2': 'FN20', 'AD3': 'FM19', 'AD4': 'EM73',
-    'AD5': 'EM12', 'AD6': 'CM97', 'AD7': 'DN31', 'AD8': 'EN81', 'AD9': 'EN52',
-    'AF0': 'EN31', 'AF1': 'FN41', 'AF2': 'FN20', 'AF3': 'FM19', 'AF4': 'EM73',
-    'AF5': 'EM12', 'AF6': 'CM97', 'AF7': 'DN31', 'AF8': 'EN81', 'AF9': 'EN52',
-    'AG0': 'EN31', 'AG1': 'FN41', 'AG2': 'FN20', 'AG3': 'FM19', 'AG4': 'EM73',
-    'AG5': 'EM12', 'AG6': 'CM97', 'AG7': 'DN31', 'AG8': 'EN81', 'AG9': 'EN52',
-    'AI0': 'EN31', 'AI1': 'FN41', 'AI2': 'FN20', 'AI3': 'FM19', 'AI4': 'EM73',
-    'AI5': 'EM12', 'AI6': 'CM97', 'AI7': 'DN31', 'AI8': 'EN81', 'AI9': 'EN52',
-    'AJ0': 'EN31', 'AJ1': 'FN41', 'AJ2': 'FN20', 'AJ3': 'FM19', 'AJ4': 'EM73',
-    'AJ5': 'EM12', 'AJ6': 'CM97', 'AJ7': 'DN31', 'AJ8': 'EN81', 'AJ9': 'EN52',
-    'AK0': 'EN31', 'AK1': 'FN41', 'AK2': 'FN20', 'AK3': 'FM19', 'AK4': 'EM73',
-    'AK5': 'EM12', 'AK6': 'CM97', 'AK7': 'DN31', 'AK8': 'EN81', 'AK9': 'EN52',
-    'AL0': 'EN31', 'AL1': 'FN41', 'AL2': 'FN20', 'AL3': 'FM19', 'AL4': 'EM73',
-    'AL5': 'EM12', 'AL6': 'CM97', 'AL7': 'BP51', 'AL8': 'EN81', 'AL9': 'EN52', // AL7 = Alaska
+    // ============================================
+    'W1': 'FN41', 'K1': 'FN41', 'N1': 'FN41', 'AA1': 'FN41',
+    'W2': 'FN20', 'K2': 'FN20', 'N2': 'FN20', 'AA2': 'FN20',
+    'W3': 'FM19', 'K3': 'FM19', 'N3': 'FM19', 'AA3': 'FM19',
+    'W4': 'EM73', 'K4': 'EM73', 'N4': 'EM73', 'AA4': 'EM73',
+    'W5': 'EM12', 'K5': 'EM12', 'N5': 'EM12', 'AA5': 'EM12',
+    'W6': 'CM97', 'K6': 'CM97', 'N6': 'CM97', 'AA6': 'CM97',
+    'W7': 'DN31', 'K7': 'DN31', 'N7': 'DN31', 'AA7': 'DN31',
+    'W8': 'EN81', 'K8': 'EN81', 'N8': 'EN81', 'AA8': 'EN81',
+    'W9': 'EN52', 'K9': 'EN52', 'N9': 'EN52', 'AA9': 'EN52',
+    'W0': 'EN31', 'K0': 'EN31', 'N0': 'EN31', 'AA0': 'EN31',
+    'W': 'EM79', 'K': 'EM79', 'N': 'EM79',
     
-    // Canada - by province
-    'VE1': 'FN74', 'VA1': 'FN74', // Maritime
-    'VE2': 'FN35', 'VA2': 'FN35', // Quebec
-    'VE3': 'FN03', 'VA3': 'FN03', // Ontario
-    'VE4': 'EN19', 'VA4': 'EN19', // Manitoba
-    'VE5': 'DO51', 'VA5': 'DO51', // Saskatchewan
-    'VE6': 'DO33', 'VA6': 'DO33', // Alberta
-    'VE7': 'CN89', 'VA7': 'CN89', // British Columbia
-    'VE8': 'DP31', 'VA8': 'DP31', // NWT
-    'VE9': 'FN65', 'VA9': 'FN65', // New Brunswick
-    'VY1': 'CP28', // Yukon
-    'VY2': 'FN86', // PEI
-    'VO1': 'GN37', 'VO2': 'GO17', // Newfoundland/Labrador
-    'VE': 'FN03', 'VA': 'FN03', // Generic Canada
-    
-    // UK & Ireland
-    'G': 'IO91', 'M': 'IO91', '2E': 'IO91', 'GW': 'IO81', // England/Wales
-    'GM': 'IO85', 'MM': 'IO85', '2M': 'IO85', // Scotland
-    'GI': 'IO64', 'MI': 'IO64', '2I': 'IO64', // N. Ireland
-    'EI': 'IO63', 'EJ': 'IO63', // Ireland
-    
-    // Germany
-    'DL': 'JO51', 'DJ': 'JO51', 'DK': 'JO51', 'DA': 'JO51', 'DB': 'JO51', 'DC': 'JO51', 'DD': 'JO51', 'DF': 'JO51', 'DG': 'JO51', 'DH': 'JO51', 'DO': 'JO51',
-    
-    // Rest of Europe
-    'F': 'JN18', // France
-    'I': 'JN61', 'IK': 'JN45', 'IZ': 'JN61', // Italy
-    'EA': 'IN80', 'EC': 'IN80', 'EB': 'IN80', // Spain
-    'CT': 'IM58', // Portugal
-    'PA': 'JO21', 'PD': 'JO21', 'PE': 'JO21', 'PH': 'JO21', // Netherlands
-    'ON': 'JO20', 'OO': 'JO20', 'OR': 'JO20', 'OT': 'JO20', // Belgium
-    'HB': 'JN47', 'HB9': 'JN47', // Switzerland
-    'OE': 'JN78', // Austria
-    'OZ': 'JO55', 'OU': 'JO55', // Denmark
-    'SM': 'JO89', 'SA': 'JO89', 'SB': 'JO89', 'SE': 'JO89', // Sweden
-    'LA': 'JO59', 'LB': 'JO59', // Norway
-    'OH': 'KP20', 'OF': 'KP20', 'OG': 'KP20', 'OI': 'KP20', // Finland
-    'SP': 'JO91', 'SQ': 'JO91', 'SO': 'JO91', '3Z': 'JO91', // Poland
-    'OK': 'JN79', 'OL': 'JN79', // Czech Republic
-    'OM': 'JN88', // Slovakia
-    'HA': 'JN97', 'HG': 'JN97', // Hungary
-    'YO': 'KN34', // Romania
-    'LZ': 'KN22', // Bulgaria
-    'YU': 'KN04', // Serbia
-    '9A': 'JN75', // Croatia
-    'S5': 'JN76', // Slovenia
-    'SV': 'KM17', 'SX': 'KM17', // Greece
-    '9H': 'JM75', // Malta
-    'LY': 'KO24', // Lithuania
-    'ES': 'KO29', // Estonia
-    'YL': 'KO26', // Latvia
-    
-    // Russia & Ukraine
-    'UA': 'KO85', 'RA': 'KO85', 'RU': 'KO85', 'RV': 'KO85', 'RW': 'KO85', 'RX': 'KO85', 'RZ': 'KO85',
-    'UA0': 'OO33', 'RA0': 'OO33', 'R0': 'OO33', // Asiatic Russia
-    'UA9': 'MO06', 'RA9': 'MO06', 'R9': 'MO06', // Ural
-    'UR': 'KO50', 'UT': 'KO50', 'UX': 'KO50', 'US': 'KO50', // Ukraine
-    
-    // Japan - by call area
-    'JA1': 'PM95', 'JH1': 'PM95', 'JR1': 'PM95', 'JE1': 'PM95', 'JF1': 'PM95', 'JG1': 'PM95', 'JI1': 'PM95', 'JJ1': 'PM95', 'JK1': 'PM95', 'JL1': 'PM95', 'JM1': 'PM95', 'JN1': 'PM95', 'JO1': 'PM95', 'JP1': 'PM95', 'JQ1': 'PM95', 'JS1': 'PM95', '7K1': 'PM95', '7L1': 'PM95', '7M1': 'PM95', '7N1': 'PM95',
-    'JA2': 'PM84', 'JA3': 'PM74', 'JA4': 'PM64', 'JA5': 'PM63', 'JA6': 'PM53', 'JA7': 'QM07', 'JA8': 'QN02', 'JA9': 'PM86', 'JA0': 'PM97',
-    'JA': 'PM95', 'JH': 'PM95', 'JR': 'PM95', 'JE': 'PM95', 'JF': 'PM95', 'JG': 'PM95', // Generic Japan
-    
-    // Rest of Asia
-    'HL': 'PM37', 'DS': 'PM37', '6K': 'PM37', '6L': 'PM37', // South Korea
-    'BV': 'PL04', 'BW': 'PL04', 'BX': 'PL04', // Taiwan
-    'BY': 'OM92', 'BT': 'OM92', 'BA': 'OM92', 'BD': 'OM92', 'BG': 'OM92', // China
-    'VU': 'MK82', 'VU2': 'MK82', 'VU3': 'MK82', // India
-    'HS': 'OK03', 'E2': 'OK03', // Thailand
-    '9V': 'OJ11', // Singapore
-    '9M': 'OJ05', '9W': 'OJ05', // Malaysia
-    'DU': 'PK04', 'DV': 'PK04', 'DW': 'PK04', 'DX': 'PK04', 'DY': 'PK04', 'DZ': 'PK04', '4D': 'PK04', '4E': 'PK04', '4F': 'PK04', '4G': 'PK04', '4H': 'PK04', '4I': 'PK04', // Philippines
-    'YB': 'OI33', 'YC': 'OI33', 'YD': 'OI33', 'YE': 'OI33', 'YF': 'OI33', 'YG': 'OI33', 'YH': 'OI33', // Indonesia
-    
-    // Oceania
-    'VK': 'QF56', 'VK1': 'QF44', 'VK2': 'QF56', 'VK3': 'QF22', 'VK4': 'QG62', 'VK5': 'PF95', 'VK6': 'OF86', 'VK7': 'QE38', // Australia
-    'ZL': 'RF70', 'ZL1': 'RF72', 'ZL2': 'RF70', 'ZL3': 'RE66', 'ZL4': 'RE54', // New Zealand
-    'KH6': 'BL01', // Hawaii
-    'KH2': 'QK24', // Guam
-    'FK': 'RG37', // New Caledonia
-    
-    // South America
-    'LU': 'GF05', 'LW': 'GF05', 'LO': 'GF05', 'L2': 'GF05', 'L3': 'GF05', 'L4': 'GF05', 'L5': 'GF05', 'L6': 'GF05', 'L7': 'GF05', 'L8': 'GF05', 'L9': 'GF05', // Argentina
-    'PY': 'GG87', 'PP': 'GG87', 'PQ': 'GG87', 'PR': 'GG87', 'PS': 'GG87', 'PT': 'GG87', 'PU': 'GG87', 'PV': 'GG87', 'PW': 'GG87', 'PX': 'GG87', // Brazil
-    'CE': 'FF46', 'CA': 'FF46', 'CB': 'FF46', 'CC': 'FF46', 'CD': 'FF46', 'XQ': 'FF46', 'XR': 'FF46', '3G': 'FF46', // Chile
-    'CX': 'GF15', // Uruguay
-    'HC': 'FI09', 'HD': 'FI09', // Ecuador
-    'OA': 'FH17', 'OB': 'FH17', 'OC': 'FH17', // Peru
-    'HK': 'FJ35', 'HJ': 'FJ35', '5J': 'FJ35', '5K': 'FJ35', // Colombia
-    'YV': 'FK60', 'YW': 'FK60', 'YX': 'FK60', 'YY': 'FK60', // Venezuela
-    
+    // ============================================
+    // US Territories
+    // ============================================
+    'KP4': 'FK68', 'NP4': 'FK68', 'WP4': 'FK68', 'KP3': 'FK68', 'NP3': 'FK68', 'WP3': 'FK68',
+    'KP2': 'FK77', 'NP2': 'FK77', 'WP2': 'FK77',
+    'KP1': 'FK28', 'NP1': 'FK28', 'WP1': 'FK28',
+    'KP5': 'FK68',
+    'KH0': 'QK25', 'NH0': 'QK25', 'WH0': 'QK25',
+    'KH1': 'BL01',
+    'KH2': 'QK24', 'NH2': 'QK24', 'WH2': 'QK24',
+    'KH3': 'BK29',
+    'KH4': 'AL07',
+    'KH5': 'BK29', 'KH5K': 'BL01',
+    'KH6': 'BL10', 'NH6': 'BL10', 'WH6': 'BL10', 'KH7': 'BL10', 'NH7': 'BL10', 'WH7': 'BL10',
+    'KH8': 'AH38', 'NH8': 'AH38', 'WH8': 'AH38',
+    'KH9': 'AK19',
+    'KL7': 'BP51', 'NL7': 'BP51', 'WL7': 'BP51', 'AL7': 'BP51',
+    'KG4': 'FK29',
+
+    // ============================================
+    // Canada
+    // ============================================
+    'VE1': 'FN74', 'VA1': 'FN74',
+    'VE2': 'FN35', 'VA2': 'FN35',
+    'VE3': 'FN03', 'VA3': 'FN03',
+    'VE4': 'EN19', 'VA4': 'EN19',
+    'VE5': 'DO51', 'VA5': 'DO51',
+    'VE6': 'DO33', 'VA6': 'DO33',
+    'VE7': 'CN89', 'VA7': 'CN89',
+    'VE8': 'DP31',
+    'VE9': 'FN65', 'VA9': 'FN65',
+    'VO1': 'GN37',
+    'VO2': 'GO17',
+    'VY0': 'EQ79',
+    'VY1': 'CP28',
+    'VY2': 'FN86',
+    'CY0': 'GN76',
+    'CY9': 'FN97',
+    'VE': 'FN03', 'VA': 'FN03',
+
+    // ============================================
+    // Mexico & Central America
+    // ============================================
+    'XE': 'EK09', 'XE1': 'EK09', 'XE2': 'DL84', 'XE3': 'EK57',
+    'XA': 'EK09', 'XB': 'EK09', 'XC': 'EK09', 'XD': 'EK09',
+    'XF': 'DK48', '4A': 'EK09', '4B': 'EK09', '4C': 'EK09',
+    '6D': 'EK09', '6E': 'EK09', '6F': 'EK09', '6G': 'EK09', '6H': 'EK09', '6I': 'EK09', '6J': 'EK09',
+    'TI': 'EJ79', 'TE': 'EJ79',
+    'TG': 'EK44', 'TD': 'EK44',
+    'HR': 'EK55', 'HQ': 'EK55',
+    'YN': 'EK62', 'HT': 'EK62', 'H6': 'EK62', 'H7': 'EK62',
+    'HP': 'FJ08', 'HO': 'FJ08', 'H3': 'FJ08', 'H8': 'FJ08', 'H9': 'FJ08', '3E': 'FJ08', '3F': 'FJ08',
+    'YS': 'EK53', 'HU': 'EK53',
+    'V3': 'EK56',
+
+    // ============================================
     // Caribbean
-    'KP4': 'FK68', 'NP4': 'FK68', 'WP4': 'FK68', // Puerto Rico
-    'VP5': 'FL31', // Turks & Caicos
-    'HI': 'FK49', // Dominican Republic
-    'CO': 'FL10', 'CM': 'FL10', // Cuba
-    'FG': 'FK96', // Guadeloupe
-    'FM': 'FK94', // Martinique
-    'PJ': 'FK52', // Netherlands Antilles
-    
-    // Africa
-    'ZS': 'KG33', 'ZR': 'KG33', 'ZT': 'KG33', 'ZU': 'KG33', // South Africa
-    '5N': 'JJ55', // Nigeria
-    'CN': 'IM63', // Morocco
-    '7X': 'JM16', // Algeria
-    'SU': 'KL30', // Egypt
-    '5Z': 'KI88', // Kenya
-    'ET': 'KJ49', // Ethiopia
-    'EA8': 'IL18', 'EA9': 'IM75', // Canary Islands, Ceuta
-    
-    // Middle East
-    'A4': 'LL93', 'A41': 'LL93', 'A45': 'LL93', // Oman
-    'A6': 'LL65', 'A61': 'LL65', // UAE
-    'A7': 'LL45', 'A71': 'LL45', // Qatar
-    'HZ': 'LL24', // Saudi Arabia
-    '4X': 'KM72', '4Z': 'KM72', // Israel
-    'OD': 'KM73', // Lebanon
-    
-    // Other
-    'VP8': 'GD18', // Falkland Islands
-    'CE9': 'FC56', 'DP0': 'IB59', 'KC4': 'FC56', // Antarctica
-    'SV5': 'KM46', 'SV9': 'KM25', // Dodecanese, Crete
+    // ============================================
+    'HI': 'FK49',
+    'CO': 'FL10', 'CM': 'FL10', 'CL': 'FL10', 'T4': 'FL10',
+    '6Y': 'FK17',
+    'VP5': 'FL31',
+    'C6': 'FL06',
+    'ZF': 'EK99',
+    'V2': 'FK97',
+    'J3': 'FK92',
+    'J6': 'FK93',
+    'J7': 'FK95',
+    'J8': 'FK93',
+    '8P': 'GK03',
+    '9Y': 'FK90',
+    'PJ2': 'FK52', 'PJ4': 'FK52',
+    'PJ5': 'FK87', 'PJ6': 'FK87', 'PJ7': 'FK88',
+    'P4': 'FK52',
+    'VP2E': 'FK88',
+    'VP2M': 'FK96',
+    'VP2V': 'FK77',
+    'V4': 'FK87',
+    'FG': 'FK96',
+    'FM': 'FK94', 'TO': 'FK94',
+    'FS': 'FK88',
+    'FJ': 'GK08',
+    'HH': 'FK38',
+
+    // ============================================
+    // South America
+    // ============================================
+    'LU': 'GF05', 'LW': 'GF05', 'LO': 'GF05', 'LR': 'GF05', 'LT': 'GF05', 'AY': 'GF05', 'AZ': 'GF05',
+    'L1': 'GF05', 'L2': 'GF05', 'L3': 'GF05', 'L4': 'GF05', 'L5': 'GF05', 'L6': 'GF05', 'L7': 'GF05', 'L8': 'GF05', 'L9': 'GF05',
+    'PY': 'GG87', 'PP': 'GG87', 'PQ': 'GG87', 'PR': 'GG87', 'PS': 'GG87', 'PT': 'GG87', 'PU': 'GG87', 'PV': 'GG87', 'PW': 'GG87', 'PX': 'GG87',
+    'ZV': 'GG87', 'ZW': 'GG87', 'ZX': 'GG87', 'ZY': 'GG87', 'ZZ': 'GG87',
+    'CE': 'FF46', 'CA': 'FF46', 'CB': 'FF46', 'CC': 'FF46', 'CD': 'FF46', 'XQ': 'FF46', 'XR': 'FF46', '3G': 'FF46',
+    'CE0Y': 'DG52',
+    'CE0Z': 'FE49',
+    'CE0X': 'FG14',
+    'CX': 'GF15', 'CV': 'GF15',
+    'HC': 'FI09', 'HD': 'FI09',
+    'HC8': 'EI49',
+    'OA': 'FH17', 'OB': 'FH17', 'OC': 'FH17', '4T': 'FH17',
+    'HK': 'FJ35', 'HJ': 'FJ35', '5J': 'FJ35', '5K': 'FJ35',
+    'HK0': 'FJ55', 'HK0M': 'EJ96',
+    'YV': 'FK60', 'YW': 'FK60', 'YX': 'FK60', 'YY': 'FK60', '4M': 'FK60',
+    'YV0': 'FK53',
+    'CP': 'FH64',
+    '8R': 'GJ24',
+    'PZ': 'GJ25',
+    'FY': 'GJ34',
+    'VP8': 'GD18', 'VP8F': 'GD18',
+    'VP8G': 'IC16',
+    'VP8H': 'GC17',
+    'VP8O': 'GC06',
+    'VP8S': 'GC06',
+
+    // ============================================
+    // Europe - UK & Ireland
+    // ============================================
+    'G': 'IO91', 'M': 'IO91', '2E': 'IO91',
+    'GW': 'IO81', 'MW': 'IO81', '2W': 'IO81',
+    'GM': 'IO85', 'MM': 'IO85', '2M': 'IO85',
+    'GI': 'IO64', 'MI': 'IO64', '2I': 'IO64',
+    'GD': 'IO74', 'MD': 'IO74', '2D': 'IO74',
+    'GJ': 'IN89', 'MJ': 'IN89', '2J': 'IN89',
+    'GU': 'IN89', 'MU': 'IN89', '2U': 'IN89',
+    'EI': 'IO63', 'EJ': 'IO63',
+
+    // ============================================
+    // Europe - Germany
+    // ============================================
+    'DL': 'JO51', 'DJ': 'JO51', 'DK': 'JO51', 'DA': 'JO51', 'DB': 'JO51', 'DC': 'JO51', 'DD': 'JO51',
+    'DF': 'JO51', 'DG': 'JO51', 'DH': 'JO51', 'DM': 'JO51', 'DO': 'JO51', 'DP': 'JO51', 'DQ': 'JO51', 'DR': 'JO51',
+
+    // ============================================
+    // Europe - France & territories
+    // ============================================
+    'F': 'JN18', 'TM': 'JN18',
+
+    // ============================================
+    // Europe - Italy
+    // ============================================
+    'I': 'JN61', 'IK': 'JN45', 'IZ': 'JN61', 'IW': 'JN61', 'IU': 'JN61',
+
+    // ============================================
+    // Europe - Spain & Portugal
+    // ============================================
+    'EA': 'IN80', 'EC': 'IN80', 'EB': 'IN80', 'ED': 'IN80', 'EE': 'IN80', 'EF': 'IN80', 'EG': 'IN80', 'EH': 'IN80',
+    'EA6': 'JM19', 'EC6': 'JM19',
+    'EA8': 'IL18', 'EC8': 'IL18',
+    'EA9': 'IM75', 'EC9': 'IM75',
+    'CT': 'IM58', 'CQ': 'IM58', 'CS': 'IM58',
+    'CT3': 'IM12', 'CQ3': 'IM12',
+    'CU': 'HM68',
+
+    // ============================================
+    // Europe - Benelux
+    // ============================================
+    'PA': 'JO21', 'PD': 'JO21', 'PE': 'JO21', 'PF': 'JO21', 'PG': 'JO21', 'PH': 'JO21', 'PI': 'JO21',
+    'ON': 'JO20', 'OO': 'JO20', 'OP': 'JO20', 'OQ': 'JO20', 'OR': 'JO20', 'OS': 'JO20', 'OT': 'JO20',
+    'LX': 'JN39',
+
+    // ============================================
+    // Europe - Alpine
+    // ============================================
+    'HB': 'JN47', 'HB9': 'JN47', 'HE': 'JN47',
+    'HB0': 'JN47',
+    'OE': 'JN78',
+
+    // ============================================
+    // Europe - Scandinavia
+    // ============================================
+    'OZ': 'JO55', 'OU': 'JO55', 'OV': 'JO55', '5P': 'JO55', '5Q': 'JO55',
+    'OX': 'GP47', 'XP': 'GP47',
+    'SM': 'JO89', 'SA': 'JO89', 'SB': 'JO89', 'SC': 'JO89', 'SD': 'JO89', 'SE': 'JO89', 'SF': 'JO89', 'SG': 'JO89', 'SH': 'JO89', 'SI': 'JO89', 'SJ': 'JO89', 'SK': 'JO89', 'SL': 'JO89', '7S': 'JO89', '8S': 'JO89',
+    'LA': 'JO59', 'LB': 'JO59', 'LC': 'JO59', 'LD': 'JO59', 'LE': 'JO59', 'LF': 'JO59', 'LG': 'JO59', 'LH': 'JO59', 'LI': 'JO59', 'LJ': 'JO59', 'LK': 'JO59', 'LL': 'JO59', 'LM': 'JO59', 'LN': 'JO59',
+    'JW': 'JQ68',
+    'JX': 'IQ50',
+    'OH': 'KP20', 'OF': 'KP20', 'OG': 'KP20', 'OI': 'KP20',
+    'OH0': 'JP90',
+    'OJ0': 'KP03',
+    'TF': 'HP94',
+
+    // ============================================
+    // Europe - Eastern
+    // ============================================
+    'SP': 'JO91', 'SQ': 'JO91', 'SO': 'JO91', 'SN': 'JO91', '3Z': 'JO91', 'HF': 'JO91',
+    'OK': 'JN79', 'OL': 'JN79',
+    'OM': 'JN88',
+    'HA': 'JN97', 'HG': 'JN97',
+    'YO': 'KN34', 'YP': 'KN34', 'YQ': 'KN34', 'YR': 'KN34',
+    'LZ': 'KN22',
+    'SV': 'KM17', 'SX': 'KM17', 'SY': 'KM17', 'SZ': 'KM17', 'J4': 'KM17',
+    'SV5': 'KM46',
+    'SV9': 'KM25',
+    'SV/A': 'KN10',
+    '9H': 'JM75',
+    'YU': 'KN04', 'YT': 'KN04', 'YZ': 'KN04',
+    '9A': 'JN75',
+    'S5': 'JN76',
+    'E7': 'JN84',
+    'Z3': 'KN01',
+    '4O': 'JN92',
+    'ZA': 'JN91',
+    'T7': 'JN63',
+    'HV': 'JN61',
+    '1A': 'JM64',
+
+    // ============================================
+    // Europe - Baltic
+    // ============================================
+    'LY': 'KO24',
+    'ES': 'KO29',
+    'YL': 'KO26',
+
+    // ============================================
+    // Russia & Ukraine & Belarus
+    // ============================================
+    'UA': 'KO85', 'RA': 'KO85', 'RU': 'KO85', 'RV': 'KO85', 'RW': 'KO85', 'RX': 'KO85', 'RZ': 'KO85',
+    'R1': 'KO85', 'R2': 'KO85', 'R3': 'KO85', 'R4': 'KO85', 'R5': 'KO85', 'R6': 'KO85',
+    'U1': 'KO85', 'U2': 'KO85', 'U3': 'KO85', 'U4': 'KO85', 'U5': 'KO85', 'U6': 'KO85',
+    'UA9': 'MO06', 'RA9': 'MO06', 'R9': 'MO06', 'U9': 'MO06',
+    'UA0': 'OO33', 'RA0': 'OO33', 'R0': 'OO33', 'U0': 'OO33',
+    'UA2': 'KO04', 'RA2': 'KO04', 'R2F': 'KO04',
+    'UR': 'KO50', 'UT': 'KO50', 'UX': 'KO50', 'US': 'KO50', 'UY': 'KO50', 'UW': 'KO50', 'UV': 'KO50', 'UU': 'KO50',
+    'EU': 'KO33', 'EV': 'KO33', 'EW': 'KO33',
+    'ER': 'KN47',
+    'C3': 'JN02',
+
+    // ============================================
+    // Asia - Japan
+    // ============================================
+    'JA': 'PM95', 'JH': 'PM95', 'JR': 'PM95', 'JE': 'PM95', 'JF': 'PM95', 'JG': 'PM95', 'JI': 'PM95', 'JJ': 'PM95', 'JK': 'PM95', 'JL': 'PM95', 'JM': 'PM95', 'JN': 'PM95', 'JO': 'PM95', 'JP': 'PM95', 'JQ': 'PM95', 'JS': 'PM95',
+    '7J': 'PM95', '7K': 'PM95', '7L': 'PM95', '7M': 'PM95', '7N': 'PM95', '8J': 'PM95', '8K': 'PM95', '8L': 'PM95', '8M': 'PM95', '8N': 'PM95',
+    'JA1': 'PM95', 'JA2': 'PM84', 'JA3': 'PM74', 'JA4': 'PM64', 'JA5': 'PM63', 'JA6': 'PM53', 'JA7': 'QM07', 'JA8': 'QN02', 'JA9': 'PM86', 'JA0': 'PM97',
+    'JD1': 'QL07',
+
+    // ============================================
+    // Asia - China & Taiwan & Hong Kong
+    // ============================================
+    'BY': 'OM92', 'BT': 'OM92', 'BA': 'OM92', 'BD': 'OM92', 'BG': 'OM92', 'BH': 'OM92', 'BI': 'OM92', 'BJ': 'OM92', 'BL': 'OM92', 'BM': 'OM92', 'BO': 'OM92', 'BP': 'OM92', 'BQ': 'OM92', 'BR': 'OM92', 'BS': 'OM92', 'BU': 'OM92',
+    'BV': 'PL04', 'BW': 'PL04', 'BX': 'PL04', 'BN': 'PL04',
+    'XX9': 'OL62', 'VR': 'OL62',
+
+    // ============================================
+    // Asia - Korea
+    // ============================================
+    'HL': 'PM37', 'DS': 'PM37', '6K': 'PM37', '6L': 'PM37', '6M': 'PM37', '6N': 'PM37', 'D7': 'PM37', 'D8': 'PM37', 'D9': 'PM37',
+    'P5': 'PM38',
+
+    // ============================================
+    // Asia - Southeast
+    // ============================================
+    'HS': 'OK03', 'E2': 'OK03',
+    'XV': 'OK30', '3W': 'OK30',
+    'XU': 'OK10',
+    'XW': 'NK97',
+    'XZ': 'NL99', '1Z': 'NL99',
+    '9V': 'OJ11',
+    '9M': 'OJ05', '9W': 'OJ05',
+    '9M6': 'OJ69', '9M8': 'OJ69', '9W6': 'OJ69', '9W8': 'OJ69',
+    'DU': 'PK04', 'DV': 'PK04', 'DW': 'PK04', 'DX': 'PK04', 'DY': 'PK04', 'DZ': 'PK04',
+    '4D': 'PK04', '4E': 'PK04', '4F': 'PK04', '4G': 'PK04', '4H': 'PK04', '4I': 'PK04',
+    'YB': 'OI33', 'YC': 'OI33', 'YD': 'OI33', 'YE': 'OI33', 'YF': 'OI33', 'YG': 'OI33', 'YH': 'OI33',
+    '7A': 'OI33', '7B': 'OI33', '7C': 'OI33', '7D': 'OI33', '7E': 'OI33', '7F': 'OI33', '7G': 'OI33', '7H': 'OI33', '7I': 'OI33',
+    '8A': 'OI33', '8B': 'OI33', '8C': 'OI33', '8D': 'OI33', '8E': 'OI33', '8F': 'OI33', '8G': 'OI33', '8H': 'OI33', '8I': 'OI33',
+    'V8': 'OJ84',
+
+    // ============================================
+    // Asia - South
+    // ============================================
+    'VU': 'MK82', 'VU2': 'MK82', 'VU3': 'MK82', 'VU4': 'MJ97', 'VU7': 'MJ58',
+    '8T': 'MK82', '8U': 'MK82', '8V': 'MK82', '8W': 'MK82', '8X': 'MK82', '8Y': 'MK82',
+    'AP': 'MM44',
+    '4S': 'MJ96',
+    'S2': 'NL93',
+    '9N': 'NL27',
+    'A5': 'NL49',
+    '8Q': 'MJ63',
+
+    // ============================================
+    // Asia - Middle East
+    // ============================================
+    'A4': 'LL93', 'A41': 'LL93', 'A43': 'LL93', 'A45': 'LL93', 'A47': 'LL93',
+    'A6': 'LL65', 'A61': 'LL65', 'A62': 'LL65', 'A63': 'LL65', 'A65': 'LL65',
+    'A7': 'LL45', 'A71': 'LL45', 'A72': 'LL45', 'A73': 'LL45', 'A75': 'LL45',
+    'A9': 'LL56', 'A91': 'LL56', 'A92': 'LL56',
+    '9K': 'LL47',
+    'HZ': 'LL24', '7Z': 'LL24', '8Z': 'LL24',
+    '4X': 'KM72', '4Z': 'KM72',
+    'OD': 'KM73',
+    'JY': 'KM71',
+    'YK': 'KM74',
+    'YI': 'LM30',
+    'EP': 'LL58', 'EQ': 'LL58',
+    'EK': 'LN20',
+    '4J': 'LN40', '4K': 'LN40',
+    '4L': 'LN21',
+    'TA': 'KN41', 'TB': 'KN41', 'TC': 'KN41', 'YM': 'KN41', 'TA1': 'KN41',
+    '5B': 'KM64', 'C4': 'KM64', 'H2': 'KM64', 'P3': 'KM64',
+    'ZC4': 'KM64',
+
+    // ============================================
+    // Asia - Central
+    // ============================================
+    'EX': 'MM78',
+    'EY': 'MM49',
+    'EZ': 'LN71',
+    'UK': 'MN41',
+    'UN': 'MN53', 'UP': 'MN53', 'UQ': 'MN53',
+    'YA': 'MM24', 'T6': 'MM24',
+
+    // ============================================
+    // Oceania - Australia
+    // ============================================
+    'VK': 'QF56', 'VK1': 'QF44', 'VK2': 'QF56', 'VK3': 'QF22', 'VK4': 'QG62', 'VK5': 'PF95', 'VK6': 'OF86', 'VK7': 'QE38', 'VK8': 'PH57', 'VK9': 'QF56',
+    'VK9C': 'OH29',
+    'VK9X': 'NH93',
+    'VK9L': 'QF92',
+    'VK9W': 'QG14',
+    'VK9M': 'QG11',
+    'VK9N': 'RF73',
+    'VK0H': 'MC55',
+    'VK0M': 'QE37',
+
+    // ============================================
+    // Oceania - New Zealand & Pacific
+    // ============================================
+    'ZL': 'RF70', 'ZL1': 'RF72', 'ZL2': 'RF70', 'ZL3': 'RE66', 'ZL4': 'RE54', 'ZM': 'RF70',
+    'ZL7': 'AE67',
+    'ZL8': 'AH36',
+    'ZL9': 'RE44',
+    'E5': 'BH83', 'E51': 'BH83',
+    'E52': 'AI38',
+    'ZK3': 'AH89',
+    'FK': 'RG37', 'TX': 'RG37',
+    'FK/C': 'RH29',
+    'FO': 'BH52',
+    'FO/A': 'CJ07',
+    'FO/C': 'CI06',
+    'FO/M': 'DI79',
+    'FW': 'AH44',
+    'A3': 'AG28', 'A35': 'AG28',
+    '5W': 'AH45',
+    'YJ': 'RH31', 'YJ0': 'RH31',
+    'H4': 'RI07', 'H44': 'RI07',
+    'P2': 'QI24',
+    'V6': 'QJ66',
+    'V7': 'RJ48',
+    'T8': 'PJ77',
+    'T2': 'RI87',
+    'T3': 'RI96',
+    'T31': 'AI58',
+    'T32': 'BI69',
+    'T33': 'AJ25',
+    'C2': 'QI32',
+    '3D2': 'RH91',
+    '3D2C': 'QH38',
+    '3D2R': 'RG26',
+    'ZK2': 'AI48',
+    'E6': 'AH28',
+
+    // ============================================
+    // Africa - North
+    // ============================================
+    'CN': 'IM63', '5C': 'IM63', '5D': 'IM63',
+    '7X': 'JM16',
+    '3V': 'JM54', 'TS': 'JM54',
+    '5A': 'JM73',
+    'SU': 'KL30', '6A': 'KL30',
+
+    // ============================================
+    // Africa - West
+    // ============================================
+    '5T': 'IL30',
+    '6W': 'IK14',
+    'C5': 'IK13',
+    'J5': 'IK52',
+    '3X': 'IJ75',
+    '9L': 'IJ38',
+    'EL': 'IJ56',
+    'TU': 'IJ95',
+    '9G': 'IJ95',
+    '5V': 'JJ07',
+    'TY': 'JJ16',
+    '5N': 'JJ55',
+    '5U': 'JK16',
+    'TZ': 'IK52',
+    'XT': 'JJ00',
+    'TJ': 'JJ55',
+    'D4': 'HK76',
+
+    // ============================================
+    // Africa - Central
+    // ============================================
+    'TT': 'JK73',
+    'TN': 'JI64',
+    '9Q': 'JI76',
+    'TL': 'JJ91',
+    'TR': 'JI41',
+    'S9': 'JJ40',
+    '3C': 'JJ41',
+    'D2': 'JH84',
+
+    // ============================================
+    // Africa - East
+    // ============================================
+    'ET': 'KJ49',
+    'E3': 'KJ76',
+    '6O': 'LJ07', 'T5': 'LJ07',
+    'J2': 'LK03',
+    '5Z': 'KI88',
+    '5X': 'KI42',
+    '5H': 'KI73',
+    '9X': 'KI45',
+    '9U': 'KI23',
+    'C9': 'KH53',
+    '7Q': 'KH54',
+    '9J': 'KH35',
+    'Z2': 'KH42',
+    '7P': 'KG30',
+    '3DA': 'KG53',
+    'A2': 'KG52',
+    'V5': 'JG87',
+
+    // ============================================
+    // Africa - South
+    // ============================================
+    'ZS': 'KG33', 'ZR': 'KG33', 'ZT': 'KG33', 'ZU': 'KG33',
+    'ZS8': 'KG42',
+    '3Y': 'JD45',
+
+    // ============================================
+    // Africa - Islands
+    // ============================================
+    'D6': 'LH47',
+    '5R': 'LH45',
+    '3B8': 'LG89',
+    '3B9': 'LH14',
+    '3B6': 'LH28',
+    'S7': 'LI73',
+    'FT5W': 'KG42',
+    'FT5X': 'MC55',
+    'FT5Z': 'ME47',
+    'FR': 'LG79',
+    'FH': 'LI15',
+    'VQ9': 'MJ66',
+
+    // ============================================
+    // Antarctica
+    // ============================================
+    'CE9': 'FC56', 'DP0': 'IB59', 'DP1': 'IB59', 'KC4': 'FC56',
+    '8J1': 'LC97', 'R1AN': 'KC29', 'ZL5': 'RB32',
+
+    // ============================================
+    // Other/Islands
+    // ============================================
+    'ZB': 'IM76',
+    'ZD7': 'IH74',
+    'ZD8': 'II22',
+    'ZD9': 'JE26',
+    '9M0': 'NJ07',
+    'BQ9': 'PJ29',
   };
   
   const upper = callsign.toUpperCase();
+  
+  // Check US territories FIRST (before generic US pattern)
+  // These start with K but are NOT mainland USA
+  const usTerritoryPrefixes = {
+    'KP1': 'FN42',  // Navassa Island
+    'KP2': 'FK77',  // US Virgin Islands
+    'KP3': 'FK68',  // Puerto Rico (same as KP4)
+    'KP4': 'FK68',  // Puerto Rico
+    'KP5': 'FK68',  // Desecheo Island
+    'NP2': 'FK77',  // US Virgin Islands
+    'NP3': 'FK68',  // Puerto Rico
+    'NP4': 'FK68',  // Puerto Rico
+    'WP2': 'FK77',  // US Virgin Islands
+    'WP3': 'FK68',  // Puerto Rico
+    'WP4': 'FK68',  // Puerto Rico
+    'KH0': 'QK25',  // Mariana Islands
+    'KH1': 'BL01',  // Baker/Howland
+    'KH2': 'QK24',  // Guam
+    'KH3': 'BL01',  // Johnston Island
+    'KH4': 'AL07',  // Midway
+    'KH5': 'BK29',  // Palmyra/Jarvis
+    'KH6': 'BL01',  // Hawaii
+    'KH7': 'BL01',  // Kure Island
+    'KH8': 'AH38',  // American Samoa
+    'KH9': 'AK19',  // Wake Island
+    'NH6': 'BL01',  // Hawaii
+    'NH7': 'BL01',  // Hawaii
+    'WH6': 'BL01',  // Hawaii
+    'WH7': 'BL01',  // Hawaii
+    'KL7': 'BP51',  // Alaska
+    'NL7': 'BP51',  // Alaska
+    'WL7': 'BP51',  // Alaska
+    'AL7': 'BP51',  // Alaska
+    'KG4': 'FK29',  // Guantanamo Bay
+  };
+  
+  // Check for US territory prefix (3 chars like KP4, KH6, KL7)
+  const territoryPrefix3 = upper.substring(0, 3);
+  if (usTerritoryPrefixes[territoryPrefix3]) {
+    const grid = usTerritoryPrefixes[territoryPrefix3];
+    const gridLoc = maidenheadToLatLon(grid);
+    if (gridLoc) {
+      return {
+        callsign,
+        lat: gridLoc.lat,
+        lon: gridLoc.lon,
+        grid: grid,
+        country: territoryPrefix3.startsWith('KP') || territoryPrefix3.startsWith('NP') || territoryPrefix3.startsWith('WP') ? 'Puerto Rico/USVI' :
+                 territoryPrefix3.startsWith('KH') || territoryPrefix3.startsWith('NH') || territoryPrefix3.startsWith('WH') ? 'Hawaii/Pacific' :
+                 territoryPrefix3.includes('L7') ? 'Alaska' : 'US Territory',
+        estimated: true,
+        source: 'prefix-grid'
+      };
+    }
+  }
   
   // Smart US callsign detection - US prefixes follow specific patterns
   // K, N, W + anything = USA
@@ -1948,6 +2614,10 @@ function estimateLocationFromPrefix(callsign) {
 function getCountryFromPrefix(prefix) {
   const prefixCountries = {
     'W': 'USA', 'K': 'USA', 'N': 'USA', 'AA': 'USA',
+    'KP4': 'Puerto Rico', 'NP4': 'Puerto Rico', 'WP4': 'Puerto Rico',
+    'KP2': 'US Virgin Is', 'NP2': 'US Virgin Is', 'WP2': 'US Virgin Is',
+    'KH6': 'Hawaii', 'NH6': 'Hawaii', 'WH6': 'Hawaii',
+    'KH2': 'Guam', 'KL7': 'Alaska', 'NL7': 'Alaska', 'WL7': 'Alaska',
     'VE': 'Canada', 'VA': 'Canada', 'VY': 'Canada', 'VO': 'Canada',
     'G': 'England', 'M': 'England', '2E': 'England', 'GM': 'Scotland', 'GW': 'Wales', 'GI': 'N. Ireland',
     'EI': 'Ireland', 'F': 'France', 'DL': 'Germany', 'I': 'Italy', 'EA': 'Spain', 'CT': 'Portugal',
@@ -1956,9 +2626,14 @@ function getCountryFromPrefix(prefix) {
     'SP': 'Poland', 'OK': 'Czech Rep', 'HA': 'Hungary', 'YO': 'Romania', 'LZ': 'Bulgaria',
     'UA': 'Russia', 'UR': 'Ukraine',
     'JA': 'Japan', 'HL': 'S. Korea', 'BV': 'Taiwan', 'BY': 'China', 'VU': 'India', 'HS': 'Thailand',
-    'VK': 'Australia', 'ZL': 'New Zealand', 'KH6': 'Hawaii',
-    'LU': 'Argentina', 'PY': 'Brazil', 'CE': 'Chile', 'HK': 'Colombia', 'YV': 'Venezuela',
-    'ZS': 'South Africa', 'CN': 'Morocco', 'SU': 'Egypt'
+    'VK': 'Australia', 'ZL': 'New Zealand',
+    'LU': 'Argentina', 'PY': 'Brazil', 'ZV': 'Brazil', 'ZW': 'Brazil', 'ZX': 'Brazil', 'ZY': 'Brazil', 'ZZ': 'Brazil',
+    'CE': 'Chile', 'HK': 'Colombia', 'YV': 'Venezuela', 'HC': 'Ecuador', 'OA': 'Peru', 'CX': 'Uruguay',
+    'ZS': 'South Africa', 'CN': 'Morocco', 'SU': 'Egypt', '5N': 'Nigeria', '5Z': 'Kenya', 'ET': 'Ethiopia',
+    'TY': 'Benin', 'TU': 'Ivory Coast', 'TR': 'Gabon', 'TZ': 'Mali', 'V5': 'Namibia', 'A2': 'Botswana',
+    'JY': 'Jordan', 'HZ': 'Saudi Arabia', 'A6': 'UAE', 'A7': 'Qatar', 'A9': 'Bahrain', 'A4': 'Oman',
+    '4X': 'Israel', 'OD': 'Lebanon', 'YK': 'Syria', 'YI': 'Iraq', 'EP': 'Iran', 'TA': 'Turkey',
+    '5B': 'Cyprus', 'EK': 'Armenia', '4J': 'Azerbaijan'
   };
   
   for (let len = 3; len >= 1; len--) {
@@ -1986,7 +2661,7 @@ app.get('/api/myspots/:callsign', async (req, res) => {
     const response = await fetch(
       `https://www.hamqth.com/dxc_csv.php?limit=100`,
       {
-        headers: { 'User-Agent': 'OpenHamClock/3.3' },
+        headers: { 'User-Agent': 'OpenHamClock/3.13.1' },
         signal: controller.signal
       }
     );
@@ -2202,7 +2877,7 @@ app.get('/api/pskreporter/http/:callsign', async (req, res) => {
     
     const response = await fetch(url, {
       headers: { 
-        'User-Agent': 'OpenHamClock/3.11 (Amateur Radio Dashboard)',
+        'User-Agent': 'OpenHamClock/3.13.1 (Amateur Radio Dashboard)',
         'Accept': '*/*'
       },
       signal: controller.signal
@@ -2676,7 +3351,7 @@ app.get('/api/wspr/heatmap', async (req, res) => {
     
     const response = await fetch(url, {
       headers: { 
-        'User-Agent': 'OpenHamClock/3.12 (Amateur Radio Dashboard)',
+        'User-Agent': 'OpenHamClock/3.13.1 (Amateur Radio Dashboard)',
         'Accept': '*/*'
       },
       signal: controller.signal
@@ -2873,7 +3548,7 @@ app.get('/api/satellites/tle', async (req, res) => {
     const response = await fetch(
       'https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=tle',
       {
-        headers: { 'User-Agent': 'OpenHamClock/3.3' },
+        headers: { 'User-Agent': 'OpenHamClock/3.13.1' },
         signal: controller.signal
       }
     );
@@ -2916,7 +3591,7 @@ app.get('/api/satellites/tle', async (req, res) => {
         const issResponse = await fetch(
           'https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=tle',
           { 
-            headers: { 'User-Agent': 'OpenHamClock/3.3' },
+            headers: { 'User-Agent': 'OpenHamClock/3.13.1' },
             signal: issController.signal
           }
         );
@@ -2979,7 +3654,7 @@ async function fetchIonosondeData() {
   
   try {
     const response = await fetch('https://prop.kc2g.com/api/stations.json', {
-      headers: { 'User-Agent': 'OpenHamClock/3.5' },
+      headers: { 'User-Agent': 'OpenHamClock/3.13.1' },
       timeout: 15000
     });
     
@@ -3790,7 +4465,7 @@ app.get('/api/contests', async (req, res) => {
     
     const response = await fetch('https://www.contestcalendar.com/calendar.rss', {
       headers: { 
-        'User-Agent': 'OpenHamClock/3.3',
+        'User-Agent': 'OpenHamClock/3.13.1',
         'Accept': 'application/rss+xml, application/xml, text/xml'
       },
       signal: controller.signal
@@ -4095,35 +4770,422 @@ function getLastWeekendOfMonth(year, month) {
 }
 
 // ============================================
-// HEALTH CHECK
+// HEALTH CHECK & STATUS DASHBOARD
 // ============================================
+
+// Generate HTML status dashboard
+function generateStatusDashboard() {
+  rolloverVisitorStats();
+  
+  const uptime = process.uptime();
+  const days = Math.floor(uptime / 86400);
+  const hours = Math.floor((uptime % 86400) / 3600);
+  const minutes = Math.floor((uptime % 3600) / 60);
+  const uptimeStr = `${days}d ${hours}h ${minutes}m`;
+  
+  // Calculate time since first deployment
+  const firstStart = new Date(visitorStats.serverFirstStarted);
+  const trackingDays = Math.floor((Date.now() - firstStart.getTime()) / 86400000);
+  
+  const avg = visitorStats.history.length > 0
+    ? Math.round(visitorStats.history.reduce((sum, d) => sum + d.uniqueVisitors, 0) / visitorStats.history.length)
+    : visitorStats.uniqueIPsToday.length;
+  
+  // Get last 14 days for the chart
+  const chartData = [...visitorStats.history].slice(-14);
+  // Add today if we have data
+  if (visitorStats.uniqueIPsToday.length > 0) {
+    chartData.push({
+      date: visitorStats.today,
+      uniqueVisitors: visitorStats.uniqueIPsToday.length,
+      totalRequests: visitorStats.totalRequestsToday
+    });
+  }
+  
+  const maxVisitors = Math.max(...chartData.map(d => d.uniqueVisitors), 1);
+  
+  // Generate bar chart
+  const bars = chartData.map(d => {
+    const height = Math.max((d.uniqueVisitors / maxVisitors) * 100, 2);
+    const date = new Date(d.date);
+    const dayLabel = date.toLocaleDateString('en-US', { weekday: 'short' }).slice(0, 2);
+    const isToday = d.date === visitorStats.today;
+    return `
+      <div class="bar-container" title="${d.date}: ${d.uniqueVisitors} visitors, ${d.totalRequests} requests">
+        <div class="bar ${isToday ? 'today' : ''}" style="height: ${height}%">
+          <span class="bar-value">${d.uniqueVisitors}</span>
+        </div>
+        <div class="bar-label">${dayLabel}</div>
+      </div>
+    `;
+  }).join('');
+  
+  // Calculate week-over-week growth
+  const thisWeek = chartData.slice(-7).reduce((sum, d) => sum + d.uniqueVisitors, 0);
+  const lastWeek = chartData.slice(-14, -7).reduce((sum, d) => sum + d.uniqueVisitors, 0);
+  const growth = lastWeek > 0 ? Math.round(((thisWeek - lastWeek) / lastWeek) * 100) : 0;
+  const growthIcon = growth > 0 ? '📈' : growth < 0 ? '📉' : '➡️';
+  const growthColor = growth > 0 ? '#00ff88' : growth < 0 ? '#ff4466' : '#888';
+  
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenHamClock Status</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: linear-gradient(135deg, #0a0f1a 0%, #1a1f2e 50%, #0d1117 100%);
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+      padding: 30px;
+      background: rgba(0, 255, 136, 0.05);
+      border: 1px solid rgba(0, 255, 136, 0.2);
+      border-radius: 16px;
+    }
+    .logo {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 2.5rem;
+      font-weight: 900;
+      background: linear-gradient(135deg, #00ff88, #00ccff);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 8px;
+    }
+    .version {
+      color: #00ff88;
+      font-size: 1rem;
+      opacity: 0.8;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 255, 136, 0.15);
+      border: 1px solid rgba(0, 255, 136, 0.4);
+      padding: 8px 16px;
+      border-radius: 20px;
+      margin-top: 15px;
+      font-weight: 600;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      background: #00ff88;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.4); }
+      50% { opacity: 0.8; box-shadow: 0 0 0 8px rgba(0, 255, 136, 0); }
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 30px;
+    }
+    .stat-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+    .stat-card:hover {
+      border-color: rgba(0, 255, 136, 0.3);
+      transform: translateY(-2px);
+    }
+    .stat-icon { font-size: 1.5rem; margin-bottom: 8px; }
+    .stat-value {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 2rem;
+      font-weight: 700;
+      color: #00ccff;
+      margin-bottom: 4px;
+    }
+    .stat-value.amber { color: #ffb347; }
+    .stat-value.green { color: #00ff88; }
+    .stat-value.purple { color: #a78bfa; }
+    .stat-label {
+      font-size: 0.75rem;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .chart-section {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 30px;
+    }
+    .chart-title {
+      font-size: 1rem;
+      color: #00ff88;
+      margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .chart-growth {
+      font-size: 0.85rem;
+      padding: 4px 10px;
+      border-radius: 12px;
+      background: rgba(0, 255, 136, 0.1);
+    }
+    .chart {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      height: 150px;
+      gap: 8px;
+      padding: 10px 0;
+    }
+    .bar-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      height: 100%;
+    }
+    .bar {
+      width: 100%;
+      max-width: 40px;
+      background: linear-gradient(180deg, #00ccff 0%, #0066cc 100%);
+      border-radius: 4px 4px 0 0;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      min-height: 4px;
+      transition: all 0.3s ease;
+      position: relative;
+    }
+    .bar.today {
+      background: linear-gradient(180deg, #00ff88 0%, #00aa55 100%);
+    }
+    .bar:hover {
+      filter: brightness(1.2);
+      transform: scaleY(1.02);
+    }
+    .bar-value {
+      position: absolute;
+      top: -22px;
+      font-size: 0.7rem;
+      color: #888;
+      font-weight: 600;
+    }
+    .bar-label {
+      font-size: 0.65rem;
+      color: #666;
+      margin-top: 6px;
+      text-transform: uppercase;
+    }
+    .info-section {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .info-row:last-child { border-bottom: none; }
+    .info-label { color: #888; }
+    .info-value { color: #e2e8f0; font-weight: 600; }
+    .footer {
+      text-align: center;
+      margin-top: 30px;
+      padding: 20px;
+      color: #555;
+      font-size: 0.8rem;
+    }
+    .footer a {
+      color: #00ccff;
+      text-decoration: none;
+    }
+    .footer a:hover { text-decoration: underline; }
+    .json-link {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 8px 16px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 6px;
+      color: #888;
+      text-decoration: none;
+      font-size: 0.75rem;
+      transition: all 0.2s;
+    }
+    .json-link:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: #e2e8f0;
+    }
+    @media (max-width: 600px) {
+      .logo { font-size: 1.8rem; }
+      .stat-value { font-size: 1.5rem; }
+      .chart { height: 120px; gap: 4px; }
+      .bar-value { font-size: 0.6rem; top: -18px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="logo">📡 OpenHamClock</div>
+      <div class="version">v${APP_VERSION}</div>
+      <div class="status-badge">
+        <span class="status-dot"></span>
+        <span>All Systems Operational</span>
+      </div>
+    </div>
+    
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon">👥</div>
+        <div class="stat-value">${visitorStats.uniqueIPsToday.length}</div>
+        <div class="stat-label">Visitors Today</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">🌍</div>
+        <div class="stat-value amber">${visitorStats.allTimeVisitors.toLocaleString()}</div>
+        <div class="stat-label">All-Time Visitors</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">📊</div>
+        <div class="stat-value green">${avg}</div>
+        <div class="stat-label">Daily Average</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">⏱️</div>
+        <div class="stat-value purple">${uptimeStr}</div>
+        <div class="stat-label">Uptime</div>
+      </div>
+    </div>
+    
+    <div class="chart-section">
+      <div class="chart-title">
+        <span>📈 Visitor Trend (${chartData.length} days)</span>
+        <span class="chart-growth" style="color: ${growthColor}">${growthIcon} ${growth > 0 ? '+' : ''}${growth}% week/week</span>
+      </div>
+      <div class="chart">
+        ${bars || '<div style="color: #666; text-align: center; width: 100%;">No historical data yet</div>'}
+      </div>
+    </div>
+    
+    <div class="info-section">
+      <div class="info-row">
+        <span class="info-label">Tracking Since</span>
+        <span class="info-value">${new Date(visitorStats.serverFirstStarted).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Days Tracked</span>
+        <span class="info-value">${trackingDays} days</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Deployment Count</span>
+        <span class="info-value">#${visitorStats.deploymentCount}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Last Deployment</span>
+        <span class="info-value">${new Date(visitorStats.lastDeployment).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Total Requests</span>
+        <span class="info-value">${visitorStats.allTimeRequests.toLocaleString()}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Persistence</span>
+        <span class="info-value" style="color: ${STATS_FILE ? '#00ff88' : '#ff4466'}">${STATS_FILE ? '✓ Working' : '✗ Memory Only'}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Stats Location</span>
+        <span class="info-value" style="font-size: 0.75rem; color: #888">${STATS_FILE || 'Memory only (no writable storage)'}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Last Saved</span>
+        <span class="info-value">${visitorStats.lastSaved ? new Date(visitorStats.lastSaved).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Not yet'}</span>
+      </div>
+    </div>
+    
+    <div class="footer">
+      <div>🔧 Built with ❤️ for Amateur Radio</div>
+      <div style="margin-top: 8px">
+        <a href="https://openhamclock.com">openhamclock.com</a> • 
+        <a href="https://github.com/OpenHamClock/OpenHamClock">GitHub</a>
+      </div>
+      <a href="/api/health?format=json" class="json-link">📋 View as JSON</a>
+    </div>
+  </div>
+</body>
+</html>`;
+}
 
 app.get('/api/health', (req, res) => {
   rolloverVisitorStats();
-  const avg = visitorStats.history.length > 0
-    ? Math.round(visitorStats.history.reduce((sum, d) => sum + d.uniqueVisitors, 0) / visitorStats.history.length)
-    : visitorStats.uniqueIPs.size;
-  res.json({
-    status: 'ok',
-    version: APP_VERSION,
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    visitors: {
-      today: {
-        date: visitorStats.today,
-        uniqueVisitors: visitorStats.uniqueIPs.size,
-        totalRequests: visitorStats.totalRequests
+  
+  // Check if browser wants HTML or explicitly requesting JSON
+  const wantsJSON = req.query.format === 'json' || 
+                    req.headers.accept?.includes('application/json') ||
+                    !req.headers.accept?.includes('text/html');
+  
+  if (wantsJSON) {
+    // JSON response for API consumers
+    const avg = visitorStats.history.length > 0
+      ? Math.round(visitorStats.history.reduce((sum, d) => sum + d.uniqueVisitors, 0) / visitorStats.history.length)
+      : visitorStats.uniqueIPsToday.length;
+    
+    res.json({
+      status: 'ok',
+      version: APP_VERSION,
+      uptime: process.uptime(),
+      uptimeFormatted: `${Math.floor(process.uptime() / 86400)}d ${Math.floor((process.uptime() % 86400) / 3600)}h ${Math.floor((process.uptime() % 3600) / 60)}m`,
+      timestamp: new Date().toISOString(),
+      persistence: {
+        enabled: !!STATS_FILE,
+        file: STATS_FILE || null,
+        lastSaved: visitorStats.lastSaved
       },
-      allTime: {
-        since: visitorStats.serverStarted,
-        uniqueVisitors: visitorStats.allTimeVisitors,
-        totalRequests: visitorStats.allTimeRequests
-      },
-      dailyAverage: avg,
-      history: visitorStats.history
-    }
-  });
+      visitors: {
+        today: {
+          date: visitorStats.today,
+          uniqueVisitors: visitorStats.uniqueIPsToday.length,
+          totalRequests: visitorStats.totalRequestsToday
+        },
+        allTime: {
+          since: visitorStats.serverFirstStarted,
+          uniqueVisitors: visitorStats.allTimeVisitors,
+          totalRequests: visitorStats.allTimeRequests,
+          deployments: visitorStats.deploymentCount
+        },
+        dailyAverage: avg,
+        history: visitorStats.history.slice(-30) // Last 30 days
+      }
+    });
+  } else {
+    // HTML dashboard for browsers
+    res.type('html').send(generateStatusDashboard());
+  }
 });
+
 
 // ============================================
 // CONFIGURATION ENDPOINT
@@ -4188,6 +5250,43 @@ app.get('/api/config', (req, res) => {
       sota: 60000,
       dxCluster: 30000
     }
+  });
+});
+
+// ============================================
+// MANUAL UPDATE ENDPOINT
+// ============================================
+app.post('/api/update', async (req, res) => {
+  if (autoUpdateState.inProgress) {
+    return res.status(409).json({ error: 'Update already in progress' });
+  }
+
+  try {
+    if (!fs.existsSync(path.join(__dirname, '.git'))) {
+      return res.status(503).json({ error: 'Not a git repository' });
+    }
+    await execFilePromise('git', ['--version']);
+    if (await hasDirtyWorkingTree()) {
+      return res.status(409).json({ error: 'Local changes detected' });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: 'Update preflight failed' });
+  }
+
+  // Respond immediately; update runs asynchronously
+  res.json({ ok: true, started: true, timestamp: Date.now() });
+
+  setTimeout(() => {
+    autoUpdateTick('manual', true);
+  }, 100);
+});
+
+app.get('/api/update/status', (req, res) => {
+  res.json({
+    enabled: AUTO_UPDATE_ENABLED,
+    inProgress: autoUpdateState.inProgress,
+    lastCheck: autoUpdateState.lastCheck,
+    lastResult: autoUpdateState.lastResult
   });
 });
 
@@ -5018,6 +6117,305 @@ app.get('/api/wsjtx/relay/download/:platform', (req, res) => {
   }
 });
 
+// CONTEST LOGGER UDP + API (N1MM / DXLog)
+// ============================================
+
+const N1MM_UDP_PORT = parseInt(process.env.N1MM_UDP_PORT || '12060');
+const N1MM_ENABLED = process.env.N1MM_UDP_ENABLED === 'true';
+const N1MM_MAX_QSOS = parseInt(process.env.N1MM_MAX_QSOS || '200');
+const N1MM_QSO_MAX_AGE = parseInt(process.env.N1MM_QSO_MAX_AGE_MINUTES || '360') * 60 * 1000;
+
+const contestQsoState = {
+  qsos: [],
+  stats: { total: 0, lastSeen: 0 }
+};
+const contestQsoIds = new Map();
+
+function extractContactInfoXml(text) {
+  if (!text) return null;
+  const start = text.indexOf('<contactinfo');
+  if (start === -1) return null;
+  const end = text.indexOf('</contactinfo>', start);
+  if (end === -1) return null;
+  return text.slice(start, end + '</contactinfo>'.length);
+}
+
+function getXmlTag(xml, tag) {
+  if (!xml) return '';
+  const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'i');
+  const match = xml.match(re);
+  return match ? match[1].trim() : '';
+}
+
+function parseN1MMTimestamp(value) {
+  if (!value) return null;
+  const normalized = value.trim().replace(' ', 'T');
+  const tsUtc = Date.parse(`${normalized}Z`);
+  if (!Number.isNaN(tsUtc)) return tsUtc;
+  const tsLocal = Date.parse(normalized);
+  if (!Number.isNaN(tsLocal)) return tsLocal;
+  return null;
+}
+
+function normalizeCallsign(value) {
+  return (value || '').trim().toUpperCase();
+}
+
+function n1mmFreqToMHz(value, bandMHz) {
+  const v = parseFloat(value);
+  if (!v || Number.isNaN(v)) return bandMHz || null;
+
+  // N1MM often reports freq in 10 Hz units (e.g., 1420000 => 14.2 MHz).
+  // Use band as a hint to pick the most plausible scaling.
+  const candidates = [
+    v / 1000000, // Hz -> MHz
+    v / 100000,  // 10 Hz -> MHz
+    v / 1000     // kHz -> MHz
+  ];
+
+  if (bandMHz && !Number.isNaN(bandMHz)) {
+    let best = candidates[0];
+    let bestDiff = Math.abs(best - bandMHz);
+    for (let i = 1; i < candidates.length; i++) {
+      const diff = Math.abs(candidates[i] - bandMHz);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = candidates[i];
+      }
+    }
+    return best;
+  }
+
+  if (v >= 1000000) return v / 1000000;
+  if (v >= 100000) return v / 100000;
+  if (v >= 1000) return v / 1000;
+  return bandMHz || null;
+}
+
+function resolveQsoLocation(dxCall, grid, comment) {
+  let gridToUse = grid;
+  if (!gridToUse && comment) {
+    const extracted = extractGridFromComment(comment);
+    if (extracted) gridToUse = extracted;
+  }
+  if (gridToUse) {
+    const loc = maidenheadToLatLon(gridToUse);
+    if (loc) {
+      return { lat: loc.lat, lon: loc.lon, grid: gridToUse, source: 'grid' };
+    }
+  }
+  const prefixLoc = estimateLocationFromPrefix(dxCall);
+  if (prefixLoc) {
+    return { lat: prefixLoc.lat, lon: prefixLoc.lon, grid: prefixLoc.grid || null, source: prefixLoc.source || 'prefix' };
+  }
+  return null;
+}
+
+function pruneContestQsos() {
+  const now = Date.now();
+  contestQsoState.qsos = contestQsoState.qsos.filter(q => (now - q.timestamp) <= N1MM_QSO_MAX_AGE);
+  if (contestQsoState.qsos.length > N1MM_MAX_QSOS) {
+    contestQsoState.qsos = contestQsoState.qsos.slice(-N1MM_MAX_QSOS);
+  }
+  if (contestQsoIds.size > N1MM_MAX_QSOS * 10) {
+    contestQsoIds.clear();
+    contestQsoState.qsos.forEach(q => contestQsoIds.set(q.id, q.timestamp));
+  }
+}
+
+function rememberContestQsoId(id) {
+  contestQsoIds.set(id, Date.now());
+  if (contestQsoIds.size > 2000) {
+    let removed = 0;
+    for (const key of contestQsoIds.keys()) {
+      contestQsoIds.delete(key);
+      removed++;
+      if (removed >= 500) break;
+    }
+  }
+}
+
+function addContestQso(qso) {
+  if (!qso || !qso.dxCall) return false;
+  const now = Date.now();
+  const timestamp = Number.isFinite(qso.timestamp) ? qso.timestamp : now;
+  const id = qso.id || `${qso.source || 'qso'}-${qso.myCall || ''}-${qso.dxCall}-${timestamp}-${qso.bandMHz || qso.freqMHz || ''}-${qso.mode || ''}`;
+  if (contestQsoIds.has(id)) return false;
+  qso.id = id;
+  qso.timestamp = timestamp;
+  rememberContestQsoId(id);
+  contestQsoState.qsos.push(qso);
+  contestQsoState.stats.total += 1;
+  contestQsoState.stats.lastSeen = now;
+  pruneContestQsos();
+  return true;
+}
+
+function parseN1MMContactInfo(xml) {
+  const dxCall = normalizeCallsign(getXmlTag(xml, 'call'));
+  if (!dxCall) return null;
+
+  const myCall = normalizeCallsign(getXmlTag(xml, 'mycall')) ||
+    normalizeCallsign(getXmlTag(xml, 'stationprefix')) ||
+    CONFIG.callsign;
+
+  const bandStr = getXmlTag(xml, 'band');
+  const bandMHz = bandStr ? parseFloat(bandStr) : null;
+  const rxRaw = parseFloat(getXmlTag(xml, 'rxfreq'));
+  const txRaw = parseFloat(getXmlTag(xml, 'txfreq'));
+  const freqMHz = n1mmFreqToMHz(!Number.isNaN(rxRaw) ? rxRaw : (!Number.isNaN(txRaw) ? txRaw : null), bandMHz);
+  const mode = (getXmlTag(xml, 'mode') || '').toUpperCase();
+  const comment = getXmlTag(xml, 'comment') || '';
+  const gridRaw = getXmlTag(xml, 'gridsquare');
+  const grid = (gridRaw || extractGridFromComment(comment) || '').toUpperCase();
+  const contestName = getXmlTag(xml, 'contestname') || '';
+  const timestampStr = getXmlTag(xml, 'timestamp') || '';
+  const timestamp = parseN1MMTimestamp(timestampStr) || Date.now();
+  const id = getXmlTag(xml, 'ID') || '';
+
+  const loc = resolveQsoLocation(dxCall, grid, comment);
+
+  const qso = {
+    id,
+    source: 'n1mm',
+    timestamp,
+    time: timestampStr,
+    myCall,
+    dxCall,
+    bandMHz: Number.isNaN(bandMHz) ? null : bandMHz,
+    freqMHz: Number.isNaN(freqMHz) ? null : freqMHz,
+    rxFreq: Number.isNaN(rxRaw) ? null : rxRaw,
+    txFreq: Number.isNaN(txRaw) ? null : txRaw,
+    mode,
+    grid: grid || null,
+    contest: contestName
+  };
+
+  if (loc) {
+    qso.lat = loc.lat;
+    qso.lon = loc.lon;
+    qso.locSource = loc.source;
+    if (!qso.grid && loc.grid) qso.grid = loc.grid;
+  }
+
+  return qso;
+}
+
+function normalizeContestQso(input, source) {
+  if (!input || typeof input !== 'object') return null;
+  const dxCall = normalizeCallsign(input.dxCall || input.call);
+  if (!dxCall) return null;
+  const myCall = normalizeCallsign(input.myCall || input.mycall || input.deCall) || CONFIG.callsign;
+  const bandMHz = parseFloat(input.bandMHz || input.band);
+  const freqMHz = parseFloat(input.freqMHz || input.freq);
+  const mode = (input.mode || '').toUpperCase();
+  const grid = (input.grid || input.gridsquare || '').toUpperCase();
+  const timestamp = typeof input.timestamp === 'number'
+    ? input.timestamp
+    : (parseN1MMTimestamp(input.timestamp) || Date.now());
+
+  let lat = parseFloat(input.lat);
+  let lon = parseFloat(input.lon);
+  let locSource = '';
+
+  if (grid && (Number.isNaN(lat) || Number.isNaN(lon))) {
+    const loc = maidenheadToLatLon(grid);
+    if (loc) {
+      lat = loc.lat;
+      lon = loc.lon;
+      locSource = 'grid';
+    }
+  }
+
+  if (Number.isNaN(lat) || Number.isNaN(lon)) {
+    const loc = estimateLocationFromPrefix(dxCall);
+    if (loc) {
+      lat = loc.lat;
+      lon = loc.lon;
+      if (!locSource) locSource = loc.source || 'prefix';
+    }
+  }
+
+  return {
+    id: input.id || '',
+    source,
+    timestamp,
+    time: input.time || '',
+    myCall,
+    dxCall,
+    bandMHz: Number.isNaN(bandMHz) ? null : bandMHz,
+    freqMHz: Number.isNaN(freqMHz) ? null : freqMHz,
+    mode,
+    grid: grid || null,
+    lat: Number.isNaN(lat) ? null : lat,
+    lon: Number.isNaN(lon) ? null : lon,
+    locSource
+  };
+}
+
+let n1mmSocket = null;
+if (N1MM_ENABLED) {
+  try {
+    n1mmSocket = dgram.createSocket('udp4');
+
+    n1mmSocket.on('message', (buf) => {
+      const text = buf.toString('utf8');
+      const xml = extractContactInfoXml(text);
+      if (!xml) return;
+      const qso = parseN1MMContactInfo(xml);
+      if (qso) addContestQso(qso);
+    });
+
+    n1mmSocket.on('error', (err) => {
+      logErrorOnce('N1MM UDP', err.message);
+    });
+
+    n1mmSocket.on('listening', () => {
+      const addr = n1mmSocket.address();
+      console.log(`[N1MM] UDP listener on ${addr.address}:${addr.port}`);
+    });
+
+    n1mmSocket.bind(N1MM_UDP_PORT, '0.0.0.0');
+  } catch (e) {
+    console.error(`[N1MM] Failed to start UDP listener: ${e.message}`);
+  }
+}
+
+// API endpoint: get contest QSOs
+app.get('/api/contest/qsos', (req, res) => {
+  const limitRaw = parseInt(req.query.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 200;
+  const since = parseInt(req.query.since) || 0;
+
+  pruneContestQsos();
+
+  const filtered = since
+    ? contestQsoState.qsos.filter(q => q.timestamp > since)
+    : contestQsoState.qsos;
+
+  res.json({
+    qsos: filtered.slice(-limit),
+    stats: {
+      total: contestQsoState.stats.total,
+      lastSeen: contestQsoState.stats.lastSeen
+    },
+    timestamp: Date.now()
+  });
+});
+
+// API endpoint: ingest contest QSOs (JSON)
+app.post('/api/contest/qsos', (req, res) => {
+  const payload = Array.isArray(req.body) ? req.body : [req.body];
+  let accepted = 0;
+
+  for (const entry of payload) {
+    const qso = normalizeContestQso(entry, 'http');
+    if (qso && addContestQso(qso)) accepted++;
+  }
+
+  res.json({ ok: true, accepted, timestamp: Date.now() });
+});
+
 // ============================================
 // CATCH-ALL FOR SPA
 // ============================================
@@ -5069,6 +6467,12 @@ app.listen(PORT, '0.0.0.0', () => {
   if (WSJTX_RELAY_KEY) {
     console.log(`  🔁 WSJT-X relay endpoint enabled (POST /api/wsjtx/relay)`);
   }
+if (N1MM_ENABLED) {
+    console.log(`  📥 N1MM UDP listener on port ${N1MM_UDP_PORT}`);
+  }
+  if (AUTO_UPDATE_ENABLED) {
+    console.log(`  🔄 Auto-update enabled every ${AUTO_UPDATE_INTERVAL_MINUTES || 60} minutes`);
+  }
   console.log('  🖥️  Open your browser to start using OpenHamClock');
   console.log('');
   if (CONFIG.callsign !== 'N0CALL') {
@@ -5080,6 +6484,8 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  In memory of Elwood Downey, WB0OEW');
   console.log('  73 de OpenHamClock contributors');
   console.log('');
+
+  startAutoUpdateScheduler();
 });
 
 // Graceful shutdown

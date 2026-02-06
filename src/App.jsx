@@ -19,7 +19,8 @@ import {
   DXpeditionPanel,
   PSKReporterPanel,
   DXNewsTicker,
-  WeatherPanel
+  WeatherPanel,
+  AnalogClockPanel
 } from './components';
 
 // Dockable layout
@@ -30,8 +31,7 @@ import { resetLayout } from './store/layoutStore.js';
 import {
   useSpaceWeather,
   useBandConditions,
-  useDXCluster,
-  useDXPaths,
+  useDXClusterData,
   usePOTASpots,
   useContests,
   useWeather,
@@ -60,6 +60,7 @@ const App = () => {
   const [config, setConfig] = useState(loadConfig);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [showDxWeather, setShowDxWeather] = useState(true);
+  const [classicAnalogClock, setClassicAnalogClock] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [startTime] = useState(Date.now());
   const [uptime, setUptime] = useState('0d 0h 0m');
@@ -71,6 +72,7 @@ const App = () => {
       const serverCfg = await fetchServerConfig();
       if (serverCfg) {
         setShowDxWeather(serverCfg.showDxWeather !== false);
+        setClassicAnalogClock(serverCfg.classicAnalogClock === true);
       }
 
       // Load config - localStorage takes priority over server config
@@ -115,6 +117,22 @@ const App = () => {
     try { return localStorage.getItem('openhamclock_tempUnit') || 'F'; } catch { return 'F'; }
   });
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [updateInProgress, setUpdateInProgress] = useState(false);
+  const isLocalInstall = useMemo(() => {
+    const host = (window.location.hostname || '').toLowerCase();
+    if (!host) return false;
+    if (host === 'openhamclock.com' || host.endsWith('.openhamclock.com')) return false;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+    if (host.endsWith('.local')) return true;
+    // RFC1918 private ranges
+    if (host.startsWith('10.') || host.startsWith('192.168.')) return true;
+    if (host.startsWith('172.')) {
+      const parts = host.split('.');
+      const second = parseInt(parts[1], 10);
+      if (second >= 16 && second <= 31) return true;
+    }
+    return false;
+  }, []);
   
   // Map layer visibility
   const [mapLayers, setMapLayers] = useState(() => {
@@ -170,6 +188,28 @@ const App = () => {
     }
   }, []);
 
+  const handleUpdateClick = useCallback(async () => {
+    if (updateInProgress) return;
+    const confirmed = window.confirm('Run update now? The server will restart when finished.');
+    if (!confirmed) return;
+    setUpdateInProgress(true);
+    try {
+      const res = await fetch('/api/update', { method: 'POST' });
+      let payload = {};
+      try { payload = await res.json(); } catch {}
+      if (!res.ok) {
+        throw new Error(payload.error || 'Update failed to start');
+      }
+      alert('Update started. The page will reload after the server restarts.');
+      setTimeout(() => {
+        try { window.location.reload(); } catch {}
+      }, 15000);
+    } catch (err) {
+      setUpdateInProgress(false);
+      alert(`Update failed: ${err.message || 'Unknown error'}`);
+    }
+  }, [updateInProgress]);
+
   useEffect(() => {
     const handler = () => setIsFullscreen(!!document.fullscreenElement);
     document.addEventListener('fullscreenchange', handler);
@@ -222,8 +262,7 @@ const App = () => {
     } catch (e) {}
   }, [pskFilters]);
   
-  const dxCluster = useDXCluster(config.dxClusterSource || 'auto', dxFilters);
-  const dxPaths = useDXPaths();
+  const dxClusterData = useDXClusterData(dxFilters);
   const dxpeditions = useDXpeditions();
   const contests = useContests();
   const propagation = usePropagation(config.location, dxLocation);
@@ -365,8 +404,7 @@ const App = () => {
           solarIndices={solarIndices}
           bandConditions={bandConditions}
           propagation={propagation}
-          dxCluster={dxCluster}
-          dxPaths={dxPaths}
+          dxClusterData={dxClusterData}
           potaSpots={potaSpots}
           mySpots={mySpots}
           dxpeditions={dxpeditions}
@@ -533,7 +571,7 @@ const App = () => {
                     <div key={b.band} style={{ display: 'flex', justifyContent: 'space-between' }}>
                       <span style={{ color: b.color }}>{b.band}</span>
                       <span style={{ color: '#fff' }}>
-                        {dxCluster.data?.filter(s => {
+                        {dxClusterData.spots?.filter(s => {
                           const freq = parseFloat(s.freq);
                           const bands = {
                             '160m': [1.8, 2], '80m': [3.5, 4], '60m': [5.3, 5.4], '40m': [7, 7.3],
@@ -580,7 +618,7 @@ const App = () => {
                 <span style={{ color: '#00ff00', fontSize: '10px' }}>dxspider.co.uk:7300</span>
               </div>
               <div style={{ flex: 1, overflow: 'auto', fontSize: '11px' }}>
-                {dxCluster.data?.slice(0, 25).map((spot, i) => (
+                {dxClusterData.spots?.slice(0, 25).map((spot, i) => (
                   <div 
                     key={i} 
                     style={{ 
@@ -611,7 +649,7 @@ const App = () => {
                 onDXChange={handleDXChange}
                 potaSpots={potaSpots.data}
                 mySpots={mySpots.data}
-                dxPaths={dxPaths.data}
+                dxPaths={dxClusterData.paths}
                 dxFilters={dxFilters}
                 satellites={satellites.data}
                 pskReporterSpots={filteredPskSpots}
@@ -802,7 +840,7 @@ const App = () => {
                 onDXChange={handleDXChange}
                 potaSpots={potaSpots.data}
                 mySpots={mySpots.data}
-                dxPaths={dxPaths.data}
+                dxPaths={dxClusterData.paths}
                 dxFilters={dxFilters}
                 satellites={satellites.data}
                 pskReporterSpots={filteredPskSpots}
@@ -902,10 +940,10 @@ const App = () => {
               <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                 <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: '14px', color: 'var(--accent-red)', fontWeight: '700', textTransform: 'uppercase' }}>DX Cluster</span>
-                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{dxCluster.data?.length || 0} spots</span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{dxClusterData.spots?.length || 0} spots</span>
                 </div>
                 <div style={{ flex: 1, overflowY: 'auto' }}>
-                  {dxCluster.data?.slice(0, 30).map((spot, i) => (
+                  {dxClusterData.spots?.slice(0, 30).map((spot, i) => (
                     <div
                       key={i}
                       style={{
@@ -1118,7 +1156,7 @@ const App = () => {
                 onDXChange={handleDXChange}
                 potaSpots={potaSpots.data}
                 mySpots={mySpots.data}
-                dxPaths={dxPaths.data}
+                dxPaths={dxClusterData.paths}
                 dxFilters={dxFilters}
                 satellites={satellites.data}
                 pskReporterSpots={filteredPskSpots}
@@ -1195,10 +1233,10 @@ const App = () => {
             }}>
               <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: '14px', color: 'var(--accent-red)', fontWeight: '700', textTransform: 'uppercase' }}>DX Cluster</span>
-                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{dxCluster.data?.length || 0}</span>
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{dxClusterData.spots?.length || 0}</span>
               </div>
               <div style={{ flex: 1, overflowY: 'auto' }}>
-                {dxCluster.data?.slice(0, 40).map((spot, i) => (
+                {dxClusterData.spots?.slice(0, 40).map((spot, i) => (
                   <div
                     key={i}
                     style={{
@@ -1264,8 +1302,11 @@ const App = () => {
           use12Hour={use12Hour}
           onTimeFormatToggle={handleTimeFormatToggle}
           onSettingsClick={() => setShowSettings(true)}
+          onUpdateClick={handleUpdateClick}
           onFullscreenToggle={handleFullscreenToggle}
           isFullscreen={isFullscreen}
+          updateInProgress={updateInProgress}
+          showUpdateButton={isLocalInstall}
         />
         
         {/* LEFT SIDEBAR */}
@@ -1318,6 +1359,13 @@ const App = () => {
             </div>
           )}
 
+          {/* Analog Clock */}
+          {classicAnalogClock && (
+            <div className="panel" style={{ flex: '0 0 auto', minHeight: '200px' }}>
+              <AnalogClockPanel currentTime={currentTime} sunTimes={deSunTimes} />
+            </div>
+          )}
+
           {/* Solar Panel */}
           {config.panels?.solar?.visible !== false && (
             <SolarPanel solarIndices={solarIndices} />
@@ -1342,7 +1390,7 @@ const App = () => {
             onDXChange={handleDXChange}
             potaSpots={potaSpots.data}
             mySpots={mySpots.data}
-            dxPaths={dxPaths.data}
+            dxPaths={dxClusterData.paths}
             dxFilters={dxFilters}
             satellites={satellites.data}
             pskReporterSpots={filteredPskSpots}
@@ -1380,9 +1428,9 @@ const App = () => {
             {config.panels?.dxCluster?.visible !== false && (
               <div style={{ flex: `${config.panels.dxCluster.size || 2} 1 auto`, minHeight: '180px', overflow: 'hidden' }}>
                 <DXClusterPanel
-                data={dxCluster.data}
-                loading={dxCluster.loading}
-                totalSpots={dxCluster.totalSpots}
+                data={dxClusterData.spots}
+                loading={dxClusterData.loading}
+                totalSpots={dxClusterData.totalSpots}
                 filters={dxFilters}
                 onFilterChange={setDxFilters}
                 onOpenFilters={() => setShowDXFilters(true)}
